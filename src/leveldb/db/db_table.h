@@ -149,7 +149,7 @@ private:
     WriteBatch* GroupWriteBatch(RecordWriter** last_writer);
 
     Status RecoverLogFile(uint64_t log_number, uint64_t recover_limit,
-                          std::vector<VersionEdit*>* edit_list);
+                          std::vector<VersionEdit>* edit_list);
     void MaybeIgnoreError(Status* s) const;
     Status GatherLogFile(uint64_t begin_num,
                          std::vector<uint64_t>* logfiles);
@@ -168,7 +168,7 @@ private:
 
 private:
     int shutdown_phase_; // 0: not shutdown, 1: shutdown1 done, 2: shutdown2 done
-    std::vector<DBImpl*> lg_list_;
+    std::map<std::string, DBImpl*> lg_list_;
     port::Mutex mutex_;
     port::AtomicPointer shutting_down_;
     port::CondVar bg_cv_;

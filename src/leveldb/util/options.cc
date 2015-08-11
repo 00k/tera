@@ -29,7 +29,6 @@ Options::Options()
       block_restart_interval(16),
       compression(kSnappyCompression),
       filter_policy(NULL),
-      exist_lg_list(NULL),
       lg_info_list(NULL),
       enable_strategy_when_get(false),
       compact_strategy_factory(NULL),

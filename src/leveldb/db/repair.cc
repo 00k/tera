@@ -478,11 +478,6 @@ Options InitDefaultOptions(const Options& options, const std::string& dbname) {
             << s.ToString() << std::endl;
     }
     assert(s.ok());
-
-    if (opt.exist_lg_list == NULL) {
-        opt.exist_lg_list = new std::set<uint32_t>;
-        opt.exist_lg_list->insert(0);
-    }
     return opt;
 }
 
@@ -491,23 +486,23 @@ public:
     DBRepairer(const std::string& dbname, const Options& options)
         : dbname_(dbname), env_(options.env),
           options_(InitDefaultOptions(options, dbname)),
-          created_own_lg_list_(options_.exist_lg_list != options.exist_lg_list),
+          created_own_lg_list_(options_.lg_info_list != options.lg_info_list),
           log_number_(0),
           last_sequence_(0) {
-        std::set<uint32_t>::iterator it = options_.exist_lg_list->begin();
-        for (; it != options_.exist_lg_list->end(); ++it) {
-            Repairer* repair = new Repairer(dbname_ + "/" + Uint64ToString(*it),
+        std::map<std::string, LG_info*>::iterator it = options_.lg_info_list->begin();
+        for (; it != options_.lg_info_list->end(); ++it) {
+            LG_info* lg_info = it->second;
+            Repairer* repair = new Repairer(dbname_ + "/" + Uint64ToString(lg_info->lg_id),
                                             options_);
             repairers.push_back(repair);
         }
     }
     ~DBRepairer() {
-        std::set<uint32_t>::iterator it = options_.exist_lg_list->begin();
-        for (; it != options_.exist_lg_list->end(); ++it) {
-            delete repairers[*it];
+        for (uint32_t i = 0; i < repairers.size(); i++) {
+            delete repairers[i];
         }
         if (created_own_lg_list_) {
-            delete options_.exist_lg_list;
+            delete options_.lg_info_list;
         }
     }
 
@@ -545,9 +540,8 @@ private:
             }
         }
 
-        std::set<uint32_t>::iterator it = options_.exist_lg_list->begin();
-        for (; it != options_.exist_lg_list->end(); ++it) {
-            repairers[*it]->FindFiles();
+        for (uint32_t i = 0; i < repairers.size(); i++) {
+            repairers[i]->FindFiles();
         }
         return status;
     }
@@ -618,29 +612,28 @@ private:
                 continue;
             }
 
-            std::vector<WriteBatch*> lg_batchs;
-            lg_batchs.resize(options_.exist_lg_list->size());
-            std::fill(lg_batchs.begin(), lg_batchs.end(), (WriteBatch*)0);
-            bool created_new_wb = false;
-            if (options_.exist_lg_list->size() > 1) {
+            std::map<std::string, WriteBatch> lg_batchs;
+            std::map<std::string, LG_info*>::iterator it = options_.lg_info_list->begin();
+            for (; it != options_.lg_info_list->end(); ++it) {
+                const std::string& lg_name = it->first;
+                lg_batchs[lg_name].Clear();
+            }
+            if (options_.lg_info_list->size() > 1) {
                 status = batch.SeperateLocalityGroup(&lg_batchs);
-                created_new_wb = true;
                 if (!status.ok()) {
                     return status;
                 }
-                for (uint32_t i = 0; i < options_.exist_lg_list->size(); ++i) {
-                    if (lg_batchs[i] != 0) {
-                        WriteBatchInternal::SetSequence(lg_batchs[i], batch_seq);
-                    }
-                }
-            } else {
-                lg_batchs[0] = (&batch);
             }
-            for (uint32_t i = 0; i < lg_batchs.size(); ++i) {
-                if (lg_batchs[i] == NULL) {
-                    continue;
+
+            std::map<std::string, WriteBatch>::iterator wb_it = lg_batchs.begin();
+            for (uint32_t i = 0; i < repairers.size(); i++) {
+                WriteBatch* wb = NULL;
+                if (repairers.size() > 1) {
+                    wb = &wb_it->second;
+                } else {
+                    wb = &batch;
                 }
-                status = repairers[i]->InsertMemTable(lg_batchs[i], batch_seq);
+                status = repairers[i]->InsertMemTable(wb, batch_seq);
                 if (!status.ok()) {
                     Log(options_.info_log, "[%s][lg:%d] Insert log #%llu: ignoring %s",
                         dbname_.c_str(), i,
@@ -648,24 +641,15 @@ private:
                         status.ToString().c_str());
                     status = Status::OK();  // Keep going with rest of file
                 } else {
-                    counter += WriteBatchInternal::Count(lg_batchs[i]);
+                    counter += WriteBatchInternal::Count(wb);
                 }
-            }
-            if (created_new_wb) {
-                for (uint32_t i = 0; i < lg_batchs.size(); ++i) {
-                    if (lg_batchs[i] != NULL) {
-                        delete lg_batchs[i];
-                        lg_batchs[i] = NULL;
-                    }
-                }
+                ++wb_it;
             }
             last_sequence_ = batch_seq + batch_count - 1;
         }
         delete lfile;
 
-        std::set<uint32_t>::iterator it = options_.exist_lg_list->begin();
-        for (; it != options_.exist_lg_list->end(); ++it) {
-            uint32_t i = *it;
+        for (uint32_t i = 0; i < repairers.size(); i++) {
             uint64_t file_num = 0;
             if (!repairers[i]->HasMemTable()) {
                 continue;
@@ -697,24 +681,21 @@ private:
     }
 
     void ExtractMetaData() {
-        std::set<uint32_t>::iterator it = options_.exist_lg_list->begin();
-        for (; it != options_.exist_lg_list->end(); ++it) {
-            repairers[*it]->ExtractMetaData();
-            if (last_sequence_ < repairers[*it]->max_sequence_) {
-                last_sequence_ = repairers[*it]->max_sequence_;
+        for (uint32_t i = 0; i < repairers.size(); i++) {
+            repairers[i]->ExtractMetaData();
+            if (last_sequence_ < repairers[i]->max_sequence_) {
+                last_sequence_ = repairers[i]->max_sequence_;
             }
         }
     }
 
     Status WriteDescriptor() {
         Status status;
-        std::set<uint32_t>::iterator it = options_.exist_lg_list->begin();
-        for (; it != options_.exist_lg_list->end(); ++it) {
-            Status s = repairers[*it]->WriteDescriptor();
+        for (uint32_t i = 0; i < repairers.size(); i++) {
+            Status s = repairers[i]->WriteDescriptor();
             if (!s.ok()) {
                 Log(options_.info_log, "[%s][lg:%d] WriteDescriptor error: %s",
-                    dbname_.c_str(), *it,
-                    s.ToString().c_str());
+                    dbname_.c_str(), i, s.ToString().c_str());
                 status = s;
             }
         }

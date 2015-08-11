@@ -211,8 +211,7 @@ struct Options {
 
   std::vector<uint64_t> snapshots_sequence;
 
-  std::set<uint32_t>* exist_lg_list;
-  std::map<uint32_t, LG_info*>* lg_info_list;
+  std::map<std::string, LG_info*>* lg_info_list;
 
   // compaction strategy to determine how to
   // drop the obsoleted kv records
@@ -313,7 +312,7 @@ struct ReadOptions {
   // which is hit during the read operation. If NULL, all
   // the locality groups will be hit.
   // Default: NULL
-  std::set<uint32_t>* target_lgs;
+  std::set<std::string>* target_lgs;
 
   // db option
   const Options* db_opt;

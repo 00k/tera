@@ -25,6 +25,7 @@
 #ifndef STORAGE_LEVELDB_INCLUDE_WRITE_BATCH_H_
 #define STORAGE_LEVELDB_INCLUDE_WRITE_BATCH_H_
 
+#include <map>
 #include <string>
 #include <vector>
 #include "leveldb/status.h"
@@ -59,7 +60,7 @@ class WriteBatch {
   };
   Status Iterate(Handler* handler) const;
 
-  Status SeperateLocalityGroup(std::vector<WriteBatch*>* lg_bw) const;
+  Status SeperateLocalityGroup(std::map<std::string, WriteBatch>* lg_bw) const;
 
  private:
   friend class WriteBatchInternal;

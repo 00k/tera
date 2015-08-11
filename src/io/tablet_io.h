@@ -153,7 +153,7 @@ public:
     bool ReleaseSnapshot(uint64_t snapshot_id,  StatusCode* status = NULL);
     void ListSnapshot(std::vector<uint64_t>* snapshot_id);
 
-    uint32_t GetLGidByCFName(const std::string& cfname);
+    bool GetLGidByCFName(const std::string& cfname, std::string* lgname);
 
     const leveldb::RawKeyOperator* GetRawKeyOperator();
 
@@ -172,9 +172,9 @@ private:
                           bool sync = false, StatusCode* status = NULL);
 //     int64_t GetDataSizeWithoutLock(StatusCode* status = NULL);
 
-    void SetupOptionsForLG();
+    bool SetupOptionsForLG();
     void TearDownOptionsForLG();
-    void IndexingCfToLG();
+    bool IndexingCfToLG();
 
     void SetupIteratorOptions(const ScanOptions& scan_options,
                               leveldb::ReadOptions* leveldb_opts);
@@ -235,8 +235,7 @@ private:
 
     const leveldb::RawKeyOperator* m_key_operator;
 
-    std::map<std::string, uint32_t> m_cf_lg_map;
-    std::map<std::string, uint32_t> m_lg_id_map;
+    std::map<std::string, std::string> m_cf_lg_map;
     StreamScanManager m_stream_scan;
     StatCounter m_counter;
 };

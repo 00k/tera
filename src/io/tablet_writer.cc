@@ -374,28 +374,34 @@ bool TabletWriter::BatchRequest(const WriteTabletRequest& request,
                 }
                 m_tablet->GetRawKeyOperator()->EncodeTeraKey(row_key, mu.family(), mu.qualifier(),
                                                             timestamp, type, &tera_key);
-                uint32_t lg_id = 0;
-                size_t lg_num = m_tablet->m_ldb_options.exist_lg_list->size();
+                size_t lg_num = m_tablet->m_ldb_options.lg_info_list->size();
                 if (lg_num > 1) {
                     if (type != leveldb::TKT_DEL) {
-                        lg_id = m_tablet->GetLGidByCFName(mu.family());
-                        leveldb::PutFixed32LGId(&tera_key, lg_id);
-                        VLOG(10) << "Batch Request, key:" << row_key << ",family:"
-                            << mu.family() << ",lg_id:" << lg_id;
-                        batch->Put(tera_key, mu.value());
+                        std::string lg;
+                        if (m_tablet->GetLGidByCFName(mu.family(), &lg)) {
+                            leveldb::PutFixed32LGId(&tera_key, lg);
+                            VLOG(10) << "Batch Request, key:" << row_key << ",family:"
+                                     << mu.family() << ",lg:" << lg;
+                            batch->Put(tera_key, mu.value());
+                        } else {
+                            VLOG(10) << "Ignore Request, key:" << row_key << ",family:"
+                                     << mu.family() << ",no lg";
+                        }
                     } else {
                         // put row_del mark to all LGs
-                        for (lg_id = 0; lg_id < lg_num; ++lg_id) {
+                        std::map<std::string, leveldb::LG_info*>::iterator it;
+                        for (it = m_tablet->m_ldb_options.lg_info_list->begin();
+                                 it != m_tablet->m_ldb_options.lg_info_list->end(); ++it) {
+                            const std::string& lg = it->first;
                             std::string tera_key_tmp = tera_key;
-                            leveldb::PutFixed32LGId(&tera_key_tmp, lg_id);
+                            leveldb::PutFixed32LGId(&tera_key_tmp, lg);
                             VLOG(10) << "Batch Request, key:" << row_key << ",family:"
-                                << mu.family() << ",lg_id:" << lg_id;
+                                << mu.family() << ",lg:" << lg;
                             batch->Put(tera_key_tmp, mu.value());
                         }
                     }
                 } else {
-                    VLOG(10) << "Batch Request, key:" << row_key << ",family:"
-                        << mu.family() << ",lg_id:" << lg_id;
+                    VLOG(10) << "Batch Request, key:" << row_key << ",family:" << mu.family();
                     batch->Put(tera_key, mu.value());
                 }
             }

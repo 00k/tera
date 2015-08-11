@@ -57,28 +57,15 @@ Options InitDefaultOptions(const Options& options, const std::string& dbname) {
         }
     }
     assert(s.ok());
-
-    if (opt.exist_lg_list == NULL) {
-        opt.exist_lg_list = new std::set<uint32_t>;
-        opt.exist_lg_list->insert(0);
-    }
+    assert(opt.lg_info_list);
     if (opt.compact_strategy_factory == NULL) {
         opt.compact_strategy_factory = new DummyCompactStrategyFactory();
     }
     return opt;
 }
 
-Options InitOptionsLG(const Options& options, uint32_t lg_id) {
+Options InitOptionsLG(const Options& options, LG_info* lg_info) {
     Options opt = options;
-    if (options.lg_info_list == NULL) {
-        return opt;
-    }
-
-    std::map<uint32_t, LG_info*>::iterator it = options.lg_info_list->find(lg_id);
-    if (it == options.lg_info_list->end() || it->second == NULL) {
-        return opt;
-    }
-    LG_info* lg_info = it->second;
     if (lg_info->env) {
         opt.env = lg_info->env;
     }
@@ -96,7 +83,7 @@ DBTable::DBTable(const Options& options, const std::string& dbname)
       bg_cv_timer_(&mutex_), bg_cv_sleeper_(&mutex_),
       options_(InitDefaultOptions(options, dbname)),
       dbname_(dbname), env_(options.env),
-      created_own_lg_list_(options_.exist_lg_list != options.exist_lg_list),
+      created_own_lg_list_(options_.lg_info_list != options.lg_info_list),
       created_own_info_log_(options_.info_log != options.info_log),
       created_own_compact_strategy_(options_.compact_strategy_factory != options.compact_strategy_factory),
       commit_snapshot_(kMaxSequenceNumber), logfile_(NULL), log_(NULL), force_switch_log_(false),
@@ -114,13 +101,12 @@ Status DBTable::Shutdown1() {
     shutting_down_.Release_Store(this);
 
     Status s;
-    for (uint32_t i = 0; i < lg_list_.size(); ++i) {
-        DBImpl* impl = lg_list_[i];
-        if (impl) {
-            Status impl_s = impl->Shutdown1();
-            if (!impl_s.ok()) {
-                s = impl_s;
-            }
+    std::map<std::string, DBImpl*>::iterator it = lg_list_.begin();
+    for (; it != lg_list_.end(); ++it) {
+        DBImpl* lg = it->second;
+        Status impl_s = lg->Shutdown1();
+        if (!impl_s.ok()) {
+            s = impl_s;
         }
     }
 
@@ -145,13 +131,12 @@ Status DBTable::Shutdown2() {
     Log(options_.info_log, "[%s] shutdown2 start", dbname_.c_str());
 
     Status s;
-    for (uint32_t i = 0; i < lg_list_.size(); ++i) {
-        DBImpl* impl = lg_list_[i];
-        if (impl) {
-            Status impl_s = impl->Shutdown2();
-            if (!impl_s.ok()) {
-                s = impl_s;
-            }
+    std::map<std::string, DBImpl*>::iterator it = lg_list_.begin();
+    for (; it != lg_list_.end(); ++it) {
+        DBImpl* lg = it->second;
+        Status impl_s = lg->Shutdown2();
+        if (!impl_s.ok()) {
+            s = impl_s;
         }
     }
 
@@ -185,15 +170,14 @@ DBTable::~DBTable() {
             Shutdown2();
         }
     }
-    for (uint32_t i = 0; i < lg_list_.size(); ++i) {
-        DBImpl* impl = lg_list_[i];
-        if (impl) {
-            delete impl;
-        }
+    std::map<std::string, DBImpl*>::iterator it = lg_list_.begin();
+    for (; it != lg_list_.end(); ++it) {
+        delete it->second;
     }
+    lg_list_.clear();
 
     if (created_own_lg_list_) {
-        delete options_.exist_lg_list;
+        delete options_.lg_info_list;
     }
 
     if (created_own_compact_strategy_) {
@@ -207,35 +191,38 @@ DBTable::~DBTable() {
 }
 
 Status DBTable::Init() {
-    std::vector<VersionEdit*> lg_edits;
+    std::vector<VersionEdit> lg_edits;
+    lg_edits.resize(options_.lg_info_list->size());
     Status s;
     Log(options_.info_log, "[%s] start Init()", dbname_.c_str());
     MutexLock lock(&mutex_);
 
+    int32_t i = 0;
     uint64_t min_log_sequence = kMaxSequenceNumber;
     std::vector<uint64_t> snapshot_sequence = options_.snapshots_sequence;
-    for (std::set<uint32_t>::iterator it = options_.exist_lg_list->begin();
-         it != options_.exist_lg_list->end() && s.ok(); ++it) {
-        uint32_t i = *it;
-        DBImpl* impl = new DBImpl(InitOptionsLG(options_, i),
-                                  dbname_ + "/" + Uint64ToString(i));
-        lg_list_.push_back(impl);
-        lg_edits.push_back(new VersionEdit);
-        for (uint32_t i = 0; i < snapshot_sequence.size(); ++i) {
-            impl->GetSnapshot(snapshot_sequence[i]);
+    std::map<std::string, LG_info*>::iterator it = options_.lg_info_list->begin();
+    for (; it != options_.lg_info_list->end() && s.ok(); ++it) {
+        const std::string& lg_name = it->first;
+        LG_info* lg_info = it->second;
+        uint32_t id = lg_info->lg_id;
+        DBImpl* lg = new DBImpl(InitOptionsLG(options_, lg_info),
+                                dbname_ + "/" + Uint64ToString(id));
+        lg_list_[lg_name] = lg;
+        for (uint32_t j = 0; j < snapshot_sequence.size(); ++j) {
+            lg->GetSnapshot(snapshot_sequence[j]);
         }
 
         // recover SST
-        Log(options_.info_log, "[%s] start Recover lg%d, last_seq= %lu",
-            dbname_.c_str(), i, impl->GetLastSequence());
-        s = impl->Recover(lg_edits[i]);
-        Log(options_.info_log, "[%s] end Recover lg%d, last_seq= %lu",
-            dbname_.c_str(), i, impl->GetLastSequence());
+        Log(options_.info_log, "[%s] start Recover lg %s, last_seq= %lu",
+            dbname_.c_str(), lg_name.c_str(), lg->GetLastSequence());
+        s = lg->Recover(&lg_edits[i]);
+        Log(options_.info_log, "[%s] end Recover lg %s, last_seq= %lu",
+            dbname_.c_str(), lg_name.c_str(), lg->GetLastSequence());
         if (s.ok()) {
-            uint64_t last_seq = impl->GetLastSequence();
+            uint64_t last_seq = lg->GetLastSequence();
 
             Log(options_.info_log,
-                "[%s] Recover lg %d last_log_seq= %lu", dbname_.c_str(), i, last_seq);
+                "[%s] Recover lg %s last_log_seq= %lu", dbname_.c_str(), lg_name.c_str(), last_seq);
             if (min_log_sequence > last_seq) {
                 min_log_sequence = last_seq;
             }
@@ -243,23 +230,19 @@ Status DBTable::Init() {
                 last_sequence_ = last_seq;
             }
         } else {
-            Log(options_.info_log, "[%s] fail to recover lg %d", dbname_.c_str(), i);
+            Log(options_.info_log, "[%s] fail to recover lg %s", dbname_.c_str(), lg_name.c_str());
             break;
         }
-    }
-    if (!s.ok()) {
-        Log(options_.info_log, "[%s] fail to recover table.", dbname_.c_str());
-        for (uint32_t i = 0; i != lg_list_.size(); ++i) {
-            delete lg_list_[i];
-        }
-        lg_list_.clear();
-        return s;
+        i++;
     }
 
-    Log(options_.info_log, "[%s] start GatherLogFile", dbname_.c_str());
-    // recover log files
     std::vector<uint64_t> logfiles;
-    s = GatherLogFile(min_log_sequence + 1, &logfiles);
+    if (s.ok()) {
+        Log(options_.info_log, "[%s] start GatherLogFile", dbname_.c_str());
+        // recover log files
+        s = GatherLogFile(min_log_sequence + 1, &logfiles);
+    }
+
     if (s.ok()) {
         for (uint32_t i = 0; i < logfiles.size(); ++i) {
             // If two log files have overlap sequence id, ignore records
@@ -278,29 +261,31 @@ Status DBTable::Init() {
         Log(options_.info_log, "[%s] Fail to GatherLogFile", dbname_.c_str());
     }
 
-    Log(options_.info_log, "[%s] start RecoverLogToLevel0Table", dbname_.c_str());
-    std::set<uint32_t>::iterator it = options_.exist_lg_list->begin();
-    for (; it != options_.exist_lg_list->end(); ++it) {
-        uint32_t i = *it;
-        DBImpl* impl = lg_list_[i];
-        s = impl->RecoverLastDumpToLevel0(lg_edits[i]);
+    if (s.ok()) {
+        i = 0;
+        Log(options_.info_log, "[%s] start RecoverLogToLevel0Table", dbname_.c_str());
+        std::map<std::string, DBImpl*>::iterator it = lg_list_.begin();
+        for (; it != lg_list_.end(); ++it) {
+            DBImpl* lg = it->second;
+            s = lg->RecoverLastDumpToLevel0(&lg_edits[i]);
 
-        // LogAndApply to lg's manifest
-        if (s.ok()) {
-            MutexLock lock(&impl->mutex_);
-            s = impl->versions_->LogAndApply(lg_edits[i], &impl->mutex_);
+            // LogAndApply to lg's manifest
             if (s.ok()) {
-                impl->DeleteObsoleteFiles();
-                impl->MaybeScheduleCompaction();
+                MutexLock lock(&lg->mutex_);
+                s = lg->versions_->LogAndApply(&lg_edits[i], &lg->mutex_);
+                if (s.ok()) {
+                    lg->DeleteObsoleteFiles();
+                    lg->MaybeScheduleCompaction();
+                } else {
+                    Log(options_.info_log, "[%s] Fail to modify manifest of lg %d",
+                        dbname_.c_str(),
+                        i);
+                }
             } else {
-                Log(options_.info_log, "[%s] Fail to modify manifest of lg %d",
-                    dbname_.c_str(),
-                    i);
+                Log(options_.info_log, "[%s] Fail to dump log to level 0", dbname_.c_str());
             }
-        } else {
-            Log(options_.info_log, "[%s] Fail to dump log to level 0", dbname_.c_str());
+            i++;
         }
-        delete lg_edits[i];
     }
 
     if (s.ok()) {
@@ -320,13 +305,24 @@ Status DBTable::Init() {
                 dbname_.c_str(), log_file_name.c_str());
         }
     }
-    Log(options_.info_log, "[%s] custom compact strategy: %s, flush trigger %lu",
-        dbname_.c_str(), options_.compact_strategy_factory->Name(),
-        options_.flush_triggered_log_num);
 
-    Log(options_.info_log, "[%s] Init() done, last_seq=%llu", dbname_.c_str(),
-        static_cast<unsigned long long>(last_sequence_));
+    if (s.ok()) {
+        Log(options_.info_log, "[%s] custom compact strategy: %s, flush trigger %lu",
+            dbname_.c_str(), options_.compact_strategy_factory->Name(),
+            options_.flush_triggered_log_num);
 
+        Log(options_.info_log, "[%s] Init() done, last_seq=%llu", dbname_.c_str(),
+            static_cast<unsigned long long>(last_sequence_));
+    }
+
+    if (!s.ok()) {
+        Log(options_.info_log, "[%s] fail to init table.", dbname_.c_str());
+        std::map<std::string, DBImpl*>::iterator it = lg_list_.begin();
+        for (; it != lg_list_.end(); ++it) {
+            delete it->second;
+        }
+        lg_list_.clear();
+    }
     return s;
 }
 
@@ -341,9 +337,10 @@ Status DBTable::Delete(const WriteOptions& options, const Slice& key) {
 
 bool DBTable::BusyWrite() {
     MutexLock l(&mutex_);
-    for (std::set<uint32_t>::iterator it = options_.exist_lg_list->begin();
-            it != options_.exist_lg_list->end(); ++it) {
-        if (lg_list_[*it]->BusyWrite()) {
+    std::map<std::string, DBImpl*>::iterator it = lg_list_.begin();
+    for (; it != lg_list_.end(); ++it) {
+        DBImpl* lg = it->second;
+        if (lg->BusyWrite()) {
             return true;
         }
     }
@@ -446,30 +443,36 @@ Status DBTable::Write(const WriteOptions& options, WriteBatch* my_batch) {
         mutex_.Lock();
     }
     if (s.ok()) {
-        std::vector<WriteBatch*> lg_updates;
-        lg_updates.resize(lg_list_.size());
-        std::fill(lg_updates.begin(), lg_updates.end(), (WriteBatch*)0);
-        bool created_new_wb = false;
+        std::map<std::string, WriteBatch> lg_updates;
         // kv version may not create snapshot
-        for (uint32_t i = 0; i < lg_list_.size(); ++i) {
-            lg_list_[i]->GetSnapshot(last_sequence_);
+        std::map<std::string, DBImpl*>::iterator it = lg_list_.begin();
+        for (; it != lg_list_.end(); ++it) {
+            const std::string& lg_name = it->first;
+            DBImpl* lg = it->second;
+            lg_updates[lg_name].Clear();
+            lg->GetSnapshot(last_sequence_);
         }
         commit_snapshot_ = last_sequence_;
         if (lg_list_.size() > 1) {
             updates->SeperateLocalityGroup(&lg_updates);
-            created_new_wb = true;
-        } else {
-            lg_updates[0] = updates;
         }
         mutex_.Unlock();
-        //TODO: should be multi-thread distributed
-        for (uint32_t i = 0; i < lg_updates.size(); ++i) {
-            assert(lg_updates[i] != NULL);
-            Status lg_s = lg_list_[i]->Write(WriteOptions(), lg_updates[i]);
+        it = lg_list_.begin();
+        for (; it != lg_list_.end(); ++it) {
+            const std::string& lg_name = it->first;
+            DBImpl* lg = it->second;
+
+            WriteBatch* wb = NULL;
+            if (lg_list_.size() > 1) {
+                wb = &lg_updates[lg_name];
+            } else {
+                wb = updates;
+            }
+            Status lg_s = lg->Write(WriteOptions(), wb);
             if (!lg_s.ok()) {
                 // 这种情况下内存处于不一致状态
-                Log(options_.info_log, "[%s] [Fatal] Write to lg%u fail",
-                    dbname_.c_str(), i);
+                Log(options_.info_log, "[%s] [Fatal] Write to lg %s fail",
+                    dbname_.c_str(), lg_name.c_str());
                 s = lg_s;
                 fatal_error_ = lg_s;
                 break;
@@ -477,25 +480,13 @@ Status DBTable::Write(const WriteOptions& options, WriteBatch* my_batch) {
         }
         mutex_.Lock();
         if (s.ok()) {
-            for (uint32_t i = 0; i < lg_list_.size(); ++i) {
-                lg_list_[i]->AddBoundLogSize(updates->DataSize());
-            }
-        }
-        // Commit updates
-        if (s.ok()) {
-            for (uint32_t i = 0; i < lg_list_.size(); ++i) {
-                lg_list_[i]->ReleaseSnapshot(commit_snapshot_);
+            std::map<std::string, DBImpl*>::iterator it = lg_list_.begin();
+            for (; it != lg_list_.end(); ++it) {
+                DBImpl* lg = it->second;
+                lg->AddBoundLogSize(updates->DataSize());
+                lg->ReleaseSnapshot(commit_snapshot_);
             }
             commit_snapshot_ = last_sequence_ + WriteBatchInternal::Count(updates);
-        }
-
-        if (created_new_wb) {
-            for (uint32_t i = 0; i < lg_updates.size(); ++i) {
-                if (lg_updates[i] != NULL) {
-                    delete lg_updates[i];
-                    lg_updates[i] = NULL;
-                }
-            }
         }
     }
 
@@ -577,16 +568,17 @@ WriteBatch* DBTable::GroupWriteBatch(RecordWriter** last_writer) {
 
 Status DBTable::Get(const ReadOptions& options,
                     const Slice& key, std::string* value) {
-    uint32_t lg_id = 0;
+    std::string lg_id = 0;
     Slice real_key = key;
     if (!GetFixed32LGId(&real_key, &lg_id)) {
-        lg_id = 0;
+        lg_id.clear();
         real_key = key;
     }
-    std::set<uint32_t>::iterator it = options_.exist_lg_list->find(lg_id);
-    if (it == options_.exist_lg_list->end()) {
-        return Status::InvalidArgument("lg_id invalid: " + Uint64ToString(lg_id));
+    std::map<std::string, DBImpl*>::iterator it = lg_list_.find(lg_id);
+    if (it == lg_list_.end()) {
+        return Status::InvalidArgument("lg invalid: " + lg_id);
     }
+    DBImpl* lg = it->second;
     ReadOptions new_options = options;
     MutexLock lock(&mutex_);
     if (options.snapshot != kMaxSequenceNumber) {
@@ -595,7 +587,7 @@ Status DBTable::Get(const ReadOptions& options,
         new_options.snapshot = commit_snapshot_;
     }
     mutex_.Unlock();
-    Status s = lg_list_[lg_id]->Get(new_options, real_key, value);
+    Status s = lg->Get(new_options, real_key, value);
     mutex_.Lock();
     return s;
 }
@@ -603,7 +595,6 @@ Status DBTable::Get(const ReadOptions& options,
 Iterator* DBTable::NewIterator(const ReadOptions& options) {
     std::vector<Iterator*> list;
     ReadOptions new_options = options;
-    std::set<uint32_t>::iterator it = options_.exist_lg_list->begin();
     mutex_.Lock();
     if (options.snapshot != kMaxSequenceNumber) {
         new_options.snapshot = options.snapshot;
@@ -611,51 +602,57 @@ Iterator* DBTable::NewIterator(const ReadOptions& options) {
         new_options.snapshot = commit_snapshot_;
     }
     mutex_.Unlock();
-    it = options_.exist_lg_list->begin();
-    for (; it != options_.exist_lg_list->end(); ++it) {
+    std::map<std::string, DBImpl*>::iterator it = lg_list_.begin();
+    for (; it != lg_list_.end(); ++it) {
+        const std::string& lg_name = it->first;
+        DBImpl* lg = it->second;
         if (options.target_lgs) {
-            std::set<uint32_t>::const_iterator found_it =
-                options.target_lgs->find(*it);
+            std::set<std::string>::const_iterator found_it =
+                options.target_lgs->find(lg_name);
             if (found_it == options.target_lgs->end()) {
                 continue;
             }
         }
-        list.push_back(lg_list_[*it]->NewIterator(new_options));
+        list.push_back(lg->NewIterator(new_options));
     }
     return NewMergingIterator(options_.comparator, &list[0], list.size());
 }
 
 const uint64_t DBTable::GetSnapshot(uint64_t last_sequence) {
     MutexLock lock(&mutex_);
-    std::set<uint32_t>::iterator it = options_.exist_lg_list->begin();
     uint64_t seq = last_sequence == kMaxSequenceNumber ? last_sequence_ : last_sequence;
-    for (; it != options_.exist_lg_list->end(); ++it) {
-        lg_list_[*it]->GetSnapshot(seq);
+    std::map<std::string, DBImpl*>::iterator it = lg_list_.begin();
+    for (; it != lg_list_.end(); ++it) {
+        DBImpl* lg = it->second;
+        lg->GetSnapshot(seq);
     }
     return seq;
 }
 
 void DBTable::ReleaseSnapshot(uint64_t sequence_number) {
-    std::set<uint32_t>::iterator it = options_.exist_lg_list->begin();
-    for (; it != options_.exist_lg_list->end(); ++it) {
-        lg_list_[*it]->ReleaseSnapshot(sequence_number);
-    }
     MutexLock lock(&mutex_);
+    std::map<std::string, DBImpl*>::iterator it = lg_list_.begin();
+    for (; it != lg_list_.end(); ++it) {
+        DBImpl* lg = it->second;
+        lg->ReleaseSnapshot(sequence_number);
+    }
 }
 
 bool DBTable::GetProperty(const Slice& property, std::string* value) {
     bool ret = true;
     std::string ret_string;
-    std::set<uint32_t>::iterator it = options_.exist_lg_list->begin();
-    for (; it != options_.exist_lg_list->end(); ++it) {
+    std::map<std::string, DBImpl*>::iterator it = lg_list_.begin();
+    for (; it != lg_list_.end(); ++it) {
+        const std::string& lg_name = it->first;
+        DBImpl* lg = it->second;
         std::string lg_value;
-        bool lg_ret = lg_list_[*it]->GetProperty(property, &lg_value);
+        bool lg_ret = lg->GetProperty(property, &lg_value);
         if (lg_ret) {
-            if (options_.exist_lg_list->size() > 1) {
-                ret_string.append(Uint64ToString(*it) + ": {\n");
+            if (lg_list_.size() > 1) {
+                ret_string.append(lg_name + ": {\n");
             }
             ret_string.append(lg_value);
-            if (options_.exist_lg_list->size() > 1) {
+            if (lg_list_.size() > 1) {
                 ret_string.append("\n}\n");
             }
         }
@@ -670,11 +667,11 @@ void DBTable::GetApproximateSizes(const Range* range, int n,
         sizes[j] = 0;
     }
 
-    std::set<uint32_t>::iterator it = options_.exist_lg_list->begin();
-    for (; it != options_.exist_lg_list->end(); ++it) {
-        uint32_t i = *it;
+    std::map<std::string, DBImpl*>::iterator it = lg_list_.begin();
+    for (; it != lg_list_.end(); ++it) {
+        DBImpl* lg = it->second;
         uint64_t lg_sizes[config::kNumLevels] = {0};
-        lg_list_[i]->GetApproximateSizes(range, n, lg_sizes);
+        lg->GetApproximateSizes(range, n, lg_sizes);
         for (int j = 0; j < n; ++j) {
             sizes[j] += lg_sizes[j];
         }
@@ -683,9 +680,11 @@ void DBTable::GetApproximateSizes(const Range* range, int n,
 
 void DBTable::CompactRange(const Slice* begin, const Slice* end) {
     std::vector<LGCompactThread*> lg_threads;
-    std::set<uint32_t>::iterator it = options_.exist_lg_list->begin();
-    for (; it != options_.exist_lg_list->end(); ++it) {
-        LGCompactThread* thread = new LGCompactThread(*it, lg_list_[*it], begin, end);
+    std::map<std::string, DBImpl*>::iterator it = lg_list_.begin();
+    for (; it != lg_list_.end(); ++it) {
+        const std::string& lg_name = it->first;
+        DBImpl* lg = it->second;
+        LGCompactThread* thread = new LGCompactThread(lg_name, lg, begin, end);
         lg_threads.push_back(thread);
         thread->Start();
     }
@@ -728,7 +727,7 @@ Status DBTable::GatherLogFile(uint64_t begin_num,
 }
 
 Status DBTable::RecoverLogFile(uint64_t log_number, uint64_t recover_limit,
-                               std::vector<VersionEdit*>* edit_list) {
+                               std::vector<VersionEdit>* edit_list) {
     struct LogReporter : public log::Reader::Reporter {
         Env* env;
         Logger* info_log;
@@ -789,49 +788,45 @@ Status DBTable::RecoverLogFile(uint64_t log_number, uint64_t recover_limit,
             last_sequence_ = last_seq;
         }
 
-        std::vector<WriteBatch*> lg_updates;
-        lg_updates.resize(lg_list_.size());
-        std::fill(lg_updates.begin(), lg_updates.end(), (WriteBatch*)0);
-        bool created_new_wb = false;
+        std::map<std::string, WriteBatch> lg_updates;
         if (lg_list_.size() > 1) {
+            std::map<std::string, DBImpl*>::iterator it = lg_list_.begin();
+            for (; it != lg_list_.end(); ++it) {
+                lg_updates[it->first].Clear();
+            }
             status = batch.SeperateLocalityGroup(&lg_updates);
-            created_new_wb = true;
             if (!status.ok()) {
                 return status;
             }
-        } else {
-            lg_updates[0] = (&batch);
         }
 
         if (status.ok()) {
-            //TODO: should be multi-thread distributed
-            for (uint32_t i = 0; i < lg_updates.size(); ++i) {
-                if (lg_updates[i] == NULL) {
+            int32_t i = 0;
+            std::map<std::string, DBImpl*>::iterator it = lg_list_.begin();
+            for (; it != lg_list_.end(); ++it) {
+                const std::string& lg_name = it->first;
+                DBImpl* lg = it->second;
+                if (last_seq <= lg->GetLastSequence()) {
                     continue;
                 }
-                if (last_seq <= lg_list_[i]->GetLastSequence()) {
-                    continue;
+                WriteBatch* wb = NULL;
+                if (lg_list_.size() > 1) {
+                    wb = &lg_updates[lg_name];
+                } else {
+                    wb = &batch;
                 }
-                uint64_t first = WriteBatchInternal::Sequence(lg_updates[i]);
-                uint64_t last = first + WriteBatchInternal::Count(lg_updates[i]) - 1;
+                uint64_t first = WriteBatchInternal::Sequence(wb);
+                uint64_t last = first + WriteBatchInternal::Count(wb) - 1;
                 // Log(options_.info_log, "[%s] recover log batch first= %lu, last= %lu\n",
                 //     dbname_.c_str(), first, last);
 
-                Status lg_s = lg_list_[i]->RecoverInsertMem(lg_updates[i], (*edit_list)[i]);
+                Status lg_s = lg->RecoverInsertMem(wb, &(*edit_list)[i]);
                 if (!lg_s.ok()) {
                     Log(options_.info_log, "[%s] recover log fail batch first= %lu, last= %lu\n",
                         dbname_.c_str(), first, last);
                     status = lg_s;
                 }
-            }
-        }
-
-        if (created_new_wb) {
-            for (uint32_t i = 0; i < lg_updates.size(); ++i) {
-                if (lg_updates[i] != NULL) {
-                    delete lg_updates[i];
-                    lg_updates[i] = NULL;
-                }
+                i++;
             }
         }
     }
@@ -925,21 +920,22 @@ bool DBTable::FindSplitKey(const std::string& start_key,
                            const std::string& end_key,
                            double ratio,
                            std::string* split_key) {
-    // sort by lg size
-    std::map<uint64_t, DBImpl*> size_of_lg;
+    DBImpl* largest_lg = NULL;
+    uint64_t largest_lg_size = 0;
     MutexLock l(&mutex_);
-    std::set<uint32_t>::iterator it = options_.exist_lg_list->begin();
-    for (; it != options_.exist_lg_list->end(); ++it) {
-        uint64_t size = lg_list_[*it]->GetScopeSize(start_key, end_key);
-        size_of_lg[size] = lg_list_[*it];
+    std::map<std::string, DBImpl*>::iterator it = lg_list_.begin();
+    for (; it != lg_list_.end(); ++it) {
+        DBImpl* lg = it->second;
+        uint64_t size = lg->GetScopeSize(start_key, end_key);
+        if (largest_lg_size < size) {
+            largest_lg_size = size;
+            largest_lg = lg;
+        }
     }
-    std::map<uint64_t, DBImpl*>::reverse_iterator biggest_it =
-        size_of_lg.rbegin();
-    if (biggest_it == size_of_lg.rend()) {
+    if (largest_lg == NULL) {
         return false;
     }
-    return biggest_it->second->FindSplitKey(start_key, end_key,
-                                            ratio, split_key);
+    return largest_lg->FindSplitKey(start_key, end_key, ratio, split_key);
 }
 
 uint64_t DBTable::GetScopeSize(const std::string& start_key,
@@ -949,9 +945,10 @@ uint64_t DBTable::GetScopeSize(const std::string& start_key,
     if (lgsize != NULL) {
         lgsize->clear();
     }
-    std::set<uint32_t>::iterator it = options_.exist_lg_list->begin();
-    for (; it != options_.exist_lg_list->end(); ++it) {
-        uint64_t lsize = lg_list_[*it]->GetScopeSize(start_key, end_key);
+    std::map<std::string, DBImpl*>::iterator it = lg_list_.begin();
+    for (; it != lg_list_.end(); ++it) {
+        DBImpl* lg = it->second;
+        uint64_t lsize = lg->GetScopeSize(start_key, end_key);
         size += lsize;
         if (lgsize != NULL) {
             lgsize->push_back(lsize);
@@ -962,9 +959,10 @@ uint64_t DBTable::GetScopeSize(const std::string& start_key,
 
 bool DBTable::MinorCompact() {
     bool ok = true;
-    std::set<uint32_t>::iterator it = options_.exist_lg_list->begin();
-    for (; it != options_.exist_lg_list->end(); ++it) {
-        bool ret = lg_list_[*it]->MinorCompact();
+    std::map<std::string, DBImpl*>::iterator it = lg_list_.begin();
+    for (; it != lg_list_.end(); ++it) {
+        DBImpl* lg = it->second;
+        bool ret = lg->MinorCompact();
         ok = (ok && ret);
     }
     MutexLock lock(&mutex_);
@@ -974,10 +972,11 @@ bool DBTable::MinorCompact() {
 
 void DBTable::CompactMissFiles(const Slice* begin, const Slice* end) {
     std::vector<LGCompactThread*> lg_threads;
-    std::set<uint32_t>::iterator it = options_.exist_lg_list->begin();
-    for (; it != options_.exist_lg_list->end(); ++it) {
-        LGCompactThread* thread = new LGCompactThread(*it, lg_list_[*it],
-                                                      begin, end, true);
+    std::map<std::string, DBImpl*>::iterator it = lg_list_.begin();
+    for (; it != lg_list_.end(); ++it) {
+        const std::string& lg_name = it->first;
+        DBImpl* lg = it->second;
+        LGCompactThread* thread = new LGCompactThread(lg_name, lg, begin, end, true);
         lg_threads.push_back(thread);
         thread->Start();
     }
@@ -992,8 +991,10 @@ void DBTable::AddInheritedLiveFiles(std::vector<std::set<uint64_t> >* live) {
     assert(live && live->size() == lg_num);
     {
         MutexLock l(&mutex_);
-        for (size_t i = 0; i < lg_num; ++i) {
-            lg_list_[i]->AddInheritedLiveFiles(live);
+        std::map<std::string, DBImpl*>::iterator it = lg_list_.begin();
+        for (; it != lg_list_.end(); ++it) {
+            DBImpl* lg = it->second;
+            lg->AddInheritedLiveFiles(live);
         }
     }
     //Log(options_.info_log, "[%s] finish collect inherited sst fils",
@@ -1005,9 +1006,10 @@ void DBTable::AddInheritedLiveFiles(std::vector<std::set<uint64_t> >* live) {
 // for unit test
 Status DBTable::TEST_CompactMemTable() {
     Status s;
-    std::set<uint32_t>::iterator it = options_.exist_lg_list->begin();
-    for (; it != options_.exist_lg_list->end(); ++it) {
-        s = lg_list_[*it]->TEST_CompactMemTable();
+    std::map<std::string, DBImpl*>::iterator it = lg_list_.begin();
+    for (; it != lg_list_.end(); ++it) {
+        DBImpl* lg = it->second;
+        s = lg->TEST_CompactMemTable();
         if (!s.ok()) {
             return s;
         }
@@ -1016,17 +1018,19 @@ Status DBTable::TEST_CompactMemTable() {
 }
 
 void DBTable::TEST_CompactRange(int level, const Slice* begin, const Slice* end) {
-    std::set<uint32_t>::iterator it = options_.exist_lg_list->begin();
-    for (; it != options_.exist_lg_list->end(); ++it) {
-        lg_list_[*it]->TEST_CompactRange(level, begin, end);
+    std::map<std::string, DBImpl*>::iterator it = lg_list_.begin();
+    for (; it != lg_list_.end(); ++it) {
+        DBImpl* lg = it->second;
+        lg->TEST_CompactRange(level, begin, end);
     }
 }
 
 Iterator* DBTable::TEST_NewInternalIterator() {
     std::vector<Iterator*> list;
-    std::set<uint32_t>::iterator it = options_.exist_lg_list->begin();
-    for (; it != options_.exist_lg_list->end(); ++it) {
-        list.push_back(lg_list_[*it]->TEST_NewInternalIterator());
+    std::map<std::string, DBImpl*>::iterator it = lg_list_.begin();
+    for (; it != lg_list_.end(); ++it) {
+        DBImpl* lg = it->second;
+        list.push_back(lg->TEST_NewInternalIterator());
     }
     return NewMergingIterator(options_.comparator, &list[0], list.size());
 }
@@ -1111,10 +1115,10 @@ void DBTable::BackgroundGarbageClean() {
 void DBTable::GarbageClean() {
     uint64_t min_last_seq = -1U;
     bool found = false;
-    std::set<uint32_t>::iterator it = options_.exist_lg_list->begin();
-    for (; it != options_.exist_lg_list->end(); ++it) {
-        DBImpl* impl = lg_list_[*it];
-        uint64_t last_seq = impl->GetLastVerSequence();
+    std::map<std::string, DBImpl*>::iterator it = lg_list_.begin();
+    for (; it != lg_list_.end(); ++it) {
+        DBImpl* lg = it->second;
+        uint64_t last_seq = lg->GetLastVerSequence();
         if (last_seq < min_last_seq) {
             min_last_seq = last_seq;
             found = true;

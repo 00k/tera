@@ -11,9 +11,9 @@
 
 namespace leveldb {
 
-extern void PutFixed32LGId(std::string *dst, uint32_t lg_id);
+extern void PutFixed32LGId(std::string *dst, const std::string& lg);
 
-extern bool GetFixed32LGId(Slice* input, uint32_t* lg_id);
+extern bool GetFixed32LGId(Slice* input, std::string* lg);
 
 } // namespace leveldb
 

@@ -90,7 +90,7 @@ Status WriteBatch::Iterate(Handler* handler) const {
   }
 }
 
-Status WriteBatch::SeperateLocalityGroup(std::vector<WriteBatch*>* lg_bw) const {
+Status WriteBatch::SeperateLocalityGroup(std::map<std::string, WriteBatch>* lg_bw) const {
   Slice input(rep_);
   if (input.size() < kHeader) {
     return Status::Corruption("malformed WriteBatch (too small)");
@@ -103,32 +103,29 @@ Status WriteBatch::SeperateLocalityGroup(std::vector<WriteBatch*>* lg_bw) const 
     found++;
     char tag = input[0];
     input.remove_prefix(1);
-    uint32_t lg_id = 0;
+    std::string lg_id;
     if (!GetLengthPrefixedSlice(&input, &key)) {
       return Status::Corruption("bad WriteBatch fetch key");
     } else {
       Slice tmp_key = key;
       if (!GetFixed32LGId(&tmp_key, &lg_id)) {
-          lg_id = 0;
-      } else {
-          key = tmp_key;
+        return Status::Corruption("bad WriteBatch fetch lg");
       }
-      assert(lg_id < lg_bw->size());
-      if ((*lg_bw)[lg_id] == NULL) {
-        WriteBatch* bw = new WriteBatch();
-        (*lg_bw)[lg_id] = bw;
+      key = tmp_key;
+      if (lg_bw->find(lg_id) == lg_bw->end()) {
+        return Status::Corruption("bad WriteBatch lg not exist");
       }
     }
     switch (tag) {
       case kTypeValue:
         if (GetLengthPrefixedSlice(&input, &value)) {
-          (*lg_bw)[lg_id]->Put(key, value);
+          (*lg_bw)[lg_id].Put(key, value);
         } else {
           return Status::Corruption("bad WriteBatch Put");
         }
         break;
       case kTypeDeletion:
-        (*lg_bw)[lg_id]->Delete(key);
+        (*lg_bw)[lg_id].Delete(key);
         // std::cout << "find delete key: " << key.ToString() << std::endl;
         break;
       default:
@@ -138,13 +135,11 @@ Status WriteBatch::SeperateLocalityGroup(std::vector<WriteBatch*>* lg_bw) const 
 
   uint64_t last_sequence = WriteBatchInternal::Sequence(this)
                            + WriteBatchInternal::Count(this) - 1;
-  for (uint32_t i = 0; i < lg_bw->size(); ++i) {
-    if ((*lg_bw)[i] == NULL) {
-      (*lg_bw)[i] = new WriteBatch();
-      WriteBatchInternal::SetCount((*lg_bw)[i], 0);
-    }
-    int c = WriteBatchInternal::Count((*lg_bw)[i]);
-    WriteBatchInternal::SetSequence((*lg_bw)[i], last_sequence - c + 1);
+  std::map<std::string, WriteBatch>::iterator it = lg_bw->begin();
+  for (; it != lg_bw->end(); ++it) {
+    WriteBatch* wb = &it->second;
+    int c = WriteBatchInternal::Count(wb);
+    WriteBatchInternal::SetSequence(wb, last_sequence - c + 1);
   }
   if (found != WriteBatchInternal::Count(this)) {
     return Status::Corruption("WriteBatch has wrong count");

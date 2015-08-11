@@ -10,24 +10,25 @@ namespace leveldb {
 
 const std::string KG_PREFIX = "//LG_ID//";
 
-void PutFixed32LGId(std::string *dst, uint32_t lg_id) {
+void PutFixed32LGId(std::string *dst, const std::string& lg) {
     std::string lg_str;
     PutLengthPrefixedSlice(&lg_str, KG_PREFIX);
-    PutVarint32(&lg_str, lg_id);
+    PutLengthPrefixedSlice(&lg_str, lg);
     PutLengthPrefixedSlice(&lg_str, *dst);
     *dst = lg_str;
 }
 
-bool GetFixed32LGId(Slice* input, uint32_t* lg_id) {
+bool GetFixed32LGId(Slice* input, std::string* lg) {
     Slice lg_str(*input);
     Slice str;
     if (!GetLengthPrefixedSlice(&lg_str, &str)) {
         return false;
     } else if (str != KG_PREFIX) {
         return false;
-    } else if (!GetVarint32(&lg_str, lg_id)) {
+    } else if (!GetLengthPrefixedSlice(&lg_str, &str)) {
         return false;
     }
+    *lg = str.ToString();
     GetLengthPrefixedSlice(&lg_str, input);
     return true;
 }

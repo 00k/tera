@@ -116,34 +116,21 @@ Status DestroyDB(const std::string& dbname, const Options& opt) {
     }
 
     // clean db/lg dir
-    if (options.exist_lg_list == NULL) {
-        options.exist_lg_list = new std::set<uint32_t>;
-        options.exist_lg_list->insert(0);
-    }
-    std::set<uint32_t>::iterator it = options.exist_lg_list->begin();
-    for (; it != options.exist_lg_list->end(); ++it) {
-        std::string lgname = dbname + "/" + Uint64ToString(*it);
+    std::map<std::string, LG_info*>::iterator it = options.lg_info_list->begin();
+    for (; it != options.lg_info_list->end(); ++it) {
+        LG_info* lg_info = it->second;
+        std::string lgname = dbname + "/" + Uint64ToString(lg_info->lg_id);
         Options lg_opt = options;
-        if (options.lg_info_list && options.lg_info_list->size() > 0) {
-            std::map<uint32_t, LG_info*>::iterator info_it =
-                options.lg_info_list->find(*it);
-            if (info_it != options.lg_info_list->end() && info_it->second != NULL) {
-                LG_info* lg_info = info_it->second;
-                if (lg_info->env && lg_info->env != lg_opt.env) {
-                    lg_opt.env = lg_info->env;
-                }
-                lg_opt.compression = lg_info->compression;
-                delete lg_info;
-            }
-        } else if (options.lg_info_list) {
-            delete options.lg_info_list;
+        if (lg_info->env && lg_info->env != lg_opt.env) {
+            lg_opt.env = lg_info->env;
         }
+        lg_opt.compression = lg_info->compression;
+
         Status lg_ret = DestroyLG(lgname, lg_opt);
         if (!lg_ret.ok()) {
             result = lg_ret;
         }
     }
-    delete options.exist_lg_list;
 
     // clean db/ dir
     uint64_t number;

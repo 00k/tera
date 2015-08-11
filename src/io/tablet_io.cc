@@ -147,16 +147,17 @@ bool TabletIO::Load(const TableSchema& schema,
 
     // any type of table should have at least 1lg+1cf.
     m_table_schema.CopyFrom(schema);
-    if (m_table_schema.locality_groups_size() == 0) {
-        // only prepare for kv-only mode, no need to set fields of it.
-        m_table_schema.add_locality_groups();
-    }
-    if (m_table_schema.column_families_size() == 0) {
-        // only prepare for kv-only mode, no need to set fields of it.
-        m_table_schema.add_column_families();
-        m_kv_only = true;
-    } else {
-        m_kv_only = m_table_schema.kv_only();
+    m_kv_only = m_table_schema.kv_only();
+    if (!SetupOptionsForLG()) {
+        LOG(ERROR) << "fail to open table: " << path;
+        TearDownOptionsForLG();
+        {
+            MutexLock lock(&m_mutex);
+            m_status = kNotInit;
+            m_db_ref_count--;
+        }
+        SetStatusCode(kInvalidArgument, status);
+        return false;
     }
 
     m_key_operator = GetRawKeyOperatorFromSchema(m_table_schema);
@@ -222,7 +223,6 @@ bool TabletIO::Load(const TableSchema& schema,
     m_ldb_options.verify_checksums_in_compaction = FLAGS_tera_leveldb_verify_checksums;
     m_ldb_options.ignore_corruption_in_compaction = FLAGS_tera_leveldb_ignore_corruption_in_compaction;
     m_ldb_options.disable_wal = m_table_schema.disable_wal();
-    SetupOptionsForLG();
 
     m_tablet_path = FLAGS_tera_tabletnode_path_prefix + path;
     LOG(INFO) << "[Load] Start Open " << m_tablet_path;
@@ -237,6 +237,7 @@ bool TabletIO::Load(const TableSchema& schema,
     if (!db_status.ok()) {
         LOG(ERROR) << "fail to open table: " << m_tablet_path
             << ", " << db_status.ToString();
+        TearDownOptionsForLG();
         {
             MutexLock lock(&m_mutex);
             m_status = kNotInit;
@@ -1379,7 +1380,7 @@ void TabletIO::SetupScanRowOptions(const ScanTabletRequest* request,
     scan_options->snapshot_id = request->snapshot_id();
 }
 
-void TabletIO::SetupOptionsForLG() {
+bool TabletIO::SetupOptionsForLG() {
     if (m_kv_only) {
         if (m_table_schema.raw_key() == TTLKv) {
             m_ldb_options.compact_strategy_factory =
@@ -1397,17 +1398,35 @@ void TabletIO::SetupOptionsForLG() {
             new leveldb::DummyCompactStrategyFactory();
     }
 
-    std::set<uint32_t>* exist_lg_list = new std::set<uint32_t>;
-    std::map<uint32_t, leveldb::LG_info*>* lg_info_list =
-        new std::map<uint32_t, leveldb::LG_info*>;
+    if (m_table_schema.locality_groups_size() == 0) {
+        LOG(INFO) << "schema invalid: no lg";
+        return false;
+    }
+    if (!m_kv_only && m_table_schema.column_families_size() == 0) {
+        LOG(INFO) << "schema invalid: no cf";
+        return false;
+    }
 
-    for (int32_t lg_i = 0; lg_i < m_table_schema.locality_groups_size();
-         ++lg_i) {
+    std::set<int32_t> lg_id_dedup;
+    m_ldb_options.lg_info_list = new std::map<std::string, leveldb::LG_info*>;
+
+    for (int32_t lg_i = 0; lg_i < m_table_schema.locality_groups_size(); ++lg_i) {
         if (m_table_schema.locality_groups(lg_i).is_del()) {
             continue;
         }
         const LocalityGroupSchema& lg_schema =
             m_table_schema.locality_groups(lg_i);
+
+        if (m_ldb_options.lg_info_list->find(lg_schema.name()) != m_ldb_options.lg_info_list->end()) {
+            LOG(INFO) << "schema invalid: duplicate lg name: " << lg_schema.name();
+            return false;
+        }
+        if (lg_id_dedup.find(lg_schema.id()) != lg_id_dedup.end()) {
+            LOG(INFO) << "schema invalid: duplicate lg id: " << lg_schema.name();
+            return false;
+        }
+        lg_id_dedup.insert(lg_schema.id());
+
         bool compress = lg_schema.compress_type();
         StoreMedium store = lg_schema.store_type();
 
@@ -1450,24 +1469,12 @@ void TabletIO::SetupOptionsForLG() {
         LOG(INFO) << ", sst_size: " << lg_schema.sst_size() << " Bytes.";
         lg_info->sst_size = lg_schema.sst_size();
         m_ldb_options.sst_size = lg_schema.sst_size();
-        exist_lg_list->insert(lg_i);
-        (*lg_info_list)[lg_i] = lg_info;
+        (*m_ldb_options.lg_info_list)[lg_schema.name()] = lg_info;
     }
+    m_ldb_options.flush_triggered_log_size = (m_ldb_options.lg_info_list->size() + 1)
+                                                 * m_ldb_options.write_buffer_size;
 
-    if (exist_lg_list->size() == 0) {
-        delete exist_lg_list;
-    } else {
-        m_ldb_options.exist_lg_list = exist_lg_list;
-        m_ldb_options.flush_triggered_log_size = (exist_lg_list->size() + 1)
-                                               * m_ldb_options.write_buffer_size;
-    }
-    if (lg_info_list->size() == 0) {
-        delete lg_info_list;
-    } else {
-        m_ldb_options.lg_info_list = lg_info_list;
-    }
-
-    IndexingCfToLG();
+    return IndexingCfToLG();
 }
 
 void TabletIO::TearDownOptionsForLG() {
@@ -1476,14 +1483,8 @@ void TabletIO::TearDownOptionsForLG() {
         m_ldb_options.compact_strategy_factory = NULL;
     }
 
-    if (m_ldb_options.exist_lg_list) {
-        m_ldb_options.exist_lg_list->clear();
-        delete m_ldb_options.exist_lg_list;
-        m_ldb_options.exist_lg_list = NULL;
-    }
-
     if (m_ldb_options.lg_info_list) {
-        std::map<uint32_t, leveldb::LG_info*>::iterator it =
+        std::map<std::string, leveldb::LG_info*>::iterator it =
             m_ldb_options.lg_info_list->begin();
         for (; it != m_ldb_options.lg_info_list->end(); ++it) {
             delete it->second;
@@ -1493,40 +1494,36 @@ void TabletIO::TearDownOptionsForLG() {
     }
 }
 
-void TabletIO::IndexingCfToLG() {
-    for (int32_t i = 0; i < m_table_schema.locality_groups_size(); ++i) {
-        const LocalityGroupSchema& lg_schema =
-            m_table_schema.locality_groups(i);
-        m_lg_id_map[lg_schema.name()] = i; // lg_schema.id();
-    }
+bool TabletIO::IndexingCfToLG() {
     for (int32_t i = 0; i < m_table_schema.column_families_size(); ++i) {
-        const ColumnFamilySchema& cf_schema =
-            m_table_schema.column_families(i);
-
-        std::map<std::string, uint32_t>::iterator it =
-            m_lg_id_map.find(cf_schema.locality_group());
-        if (it == m_lg_id_map.end()) {
-            // using default lg for not-defined descor
-            m_cf_lg_map[cf_schema.name()] = 0;
-        } else {
-            m_cf_lg_map[cf_schema.name()] = it->second;
+        const ColumnFamilySchema& cf_schema = m_table_schema.column_families(i);
+        if (m_cf_lg_map.find(cf_schema.name()) != m_cf_lg_map.end()) {
+            LOG(INFO) << "schema invalid: duplicate cf name: " << cf_schema.name();
+            return false;
         }
+        if (m_ldb_options.lg_info_list->find(cf_schema.locality_group())
+                == m_ldb_options.lg_info_list->end()) {
+            LOG(INFO) << "schema invalid: no lg for cf: " << cf_schema.name();
+            return false;
+        }
+        m_cf_lg_map[cf_schema.name()] = cf_schema.locality_group();
     }
+    return true;
 }
 
 void TabletIO::SetupIteratorOptions(const ScanOptions& scan_options,
                                     leveldb::ReadOptions* leveldb_opts) {
-    std::set<uint32_t> target_lgs;
+    std::set<std::string> target_lgs;
     std::set<std::string>::const_iterator cf_it = scan_options.iter_cf_set.begin();
     for (; cf_it != scan_options.iter_cf_set.end(); ++cf_it) {
-        std::map<std::string, uint32_t>::iterator map_it =
+        std::map<std::string, std::string>::iterator map_it =
             m_cf_lg_map.find(*cf_it);
         if (map_it != m_cf_lg_map.end()) {
             target_lgs.insert(map_it->second);
         }
     }
     if (target_lgs.size() > 0) {
-        leveldb_opts->target_lgs = new std::set<uint32_t>(target_lgs);
+        leveldb_opts->target_lgs = new std::set<std::string>(target_lgs);
     }
 }
 
@@ -1697,12 +1694,13 @@ void TabletIO::ListSnapshot(std::vector<uint64_t>* snapshot_id) {
     }
 }
 
-uint32_t TabletIO::GetLGidByCFName(const std::string& cfname) {
-    std::map<std::string, uint32_t>::iterator it = m_cf_lg_map.find(cfname);
+bool TabletIO::GetLGidByCFName(const std::string& cfname, std::string* lgname) {
+    std::map<std::string, std::string>::iterator it = m_cf_lg_map.find(cfname);
     if (it != m_cf_lg_map.end()) {
-        return it->second;
+        *lgname = it->second;
+        return true;
     }
-    return 0;
+    return false;
 }
 
 void TabletIO::SetStatus(TabletStatus status) {

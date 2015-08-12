@@ -79,7 +79,7 @@ Options InitOptionsLG(const Options& options, LG_info* lg_info) {
 }
 
 DBTable::DBTable(const Options& options, const std::string& dbname)
-    : shutdown_phase_(0), shutting_down_(NULL), bg_cv_(&mutex_),
+    : shutdown_phase_(-1), shutting_down_(NULL), bg_cv_(&mutex_),
       bg_cv_timer_(&mutex_), bg_cv_sleeper_(&mutex_),
       options_(InitDefaultOptions(options, dbname)),
       dbname_(dbname), env_(options.env),
@@ -160,11 +160,11 @@ Status DBTable::Shutdown2() {
 }
 
 DBTable::~DBTable() {
-    assert(shutdown_phase_ >= 0 && shutdown_phase_ <= 2);
+    assert(shutdown_phase_ >= -1 && shutdown_phase_ <= 2);
     // Shutdown1 must be called before delete.
     // Shutdown2 is both OK to be called or not.
     // But if Shutdown1 returns non-ok, Shutdown2 must NOT be called.
-    if (shutdown_phase_ < 1) {
+    if (shutdown_phase_ == 0) {
         Status s = Shutdown1();
         if (s.ok()) {
             Shutdown2();
@@ -307,15 +307,14 @@ Status DBTable::Init() {
     }
 
     if (s.ok()) {
+        shutdown_phase_ = 0;
         Log(options_.info_log, "[%s] custom compact strategy: %s, flush trigger %lu",
             dbname_.c_str(), options_.compact_strategy_factory->Name(),
             options_.flush_triggered_log_num);
 
         Log(options_.info_log, "[%s] Init() done, last_seq=%llu", dbname_.c_str(),
             static_cast<unsigned long long>(last_sequence_));
-    }
-
-    if (!s.ok()) {
+    } else {
         Log(options_.info_log, "[%s] fail to init table.", dbname_.c_str());
         std::map<std::string, DBImpl*>::iterator it = lg_list_.begin();
         for (; it != lg_list_.end(); ++it) {

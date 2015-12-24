@@ -81,7 +81,9 @@ TableImpl::TableImpl(const std::string& table_name,
       _thread_pool(thread_pool),
       _cluster(cluster),
       _cluster_private(false),
-      _pending_timeout_ms(FLAGS_tera_rpc_timeout_period) {
+      _pending_timeout_ms(FLAGS_tera_rpc_timeout_period),
+      _in_txn(false),
+      _txn_id(0) {
     if (_cluster == NULL) {
         _cluster = new sdk::ClusterFinder(zk_root_path, zk_addr_list);
         _cluster_private = true;
@@ -423,6 +425,23 @@ void TableImpl::ScanCallBack(ScanTask* scan_task,
 }
 
 void TableImpl::SetReadTimeout(int64_t timeout_ms) {
+}
+
+bool TableImpl::BeginTransaction() {
+    MutexLock l(&_txn_mutex);
+    if (_in_txn) {
+        return false;
+    }
+    _in_txn = true;
+    _txn_id++;
+}
+
+bool TableImpl::Commit() {
+
+}
+
+void TableImpl::Rollback() {
+
 }
 
 bool TableImpl::LockRow(const std::string& rowkey, RowLock* lock, ErrorCode* err) {

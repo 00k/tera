@@ -589,6 +589,15 @@ public:
     virtual void SetWriteTimeout(int64_t timeout_ms) = 0;
     virtual void SetReadTimeout(int64_t timeout_ms) = 0;
 
+    /// 开始事务
+    virtual bool BeginTransaction() = 0;
+
+    /// 提交事务
+    virtual bool Commit() = 0;
+
+    /// 回滚事务
+    virtual void Rollback() = 0;
+
     /// 创建行锁
     virtual bool LockRow(const std::string& rowkey, RowLock* lock, ErrorCode* err) = 0;
 

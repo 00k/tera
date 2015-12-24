@@ -164,6 +164,9 @@ public:
     virtual void SetWriteTimeout(int64_t timeout_ms);
     virtual void SetReadTimeout(int64_t timeout_ms);
 
+    virtual bool BeginTransaction();
+    virtual bool Commit();
+    virtual void Rollback();
     virtual bool LockRow(const std::string& rowkey, RowLock* lock, ErrorCode* err);
 
     virtual bool GetStartEndKeys(std::string* start_key, std::string* end_key,
@@ -427,6 +430,12 @@ private:
     /// read request will contain this member,
     /// so tabletnodes can drop the read-request that timeouted
     uint64_t _pending_timeout_ms;
+
+    /// transaction
+    mutable Mutex _txn_mutex;
+    bool _in_txn;
+    uint64_t _txn_id;
+    std::map<std::string, RowLockType> _row_locks;
 };
 
 } // namespace tera

@@ -307,6 +307,26 @@ message TsCmdCtrlResponse {
     required StatusCode status = 2;
 }
 
+
+enum LockAction {
+    kSharedLock = 100;
+    kExclusiveLock = 101;
+    kUnlock = 102;
+}
+
+message LockRequest {
+    optional uint64 sequence_id = 1;
+    optional string tablet_name = 2;
+    optional LockAction lock_action = 3;
+    optional uint64 lock_id = 4;
+    optional bytes row_key = 5;
+}
+
+message LockResponse {
+    optional uint64 sequence_id = 1;
+    required StatusCode status = 2;
+}
+
 // RPC interface
 
 service TabletNodeServer {
@@ -337,5 +357,6 @@ service TabletNodeServer {
 
     rpc SplitTablet(SplitTabletRequest) returns(SplitTabletResponse);
     rpc CmdCtrl(TsCmdCtrlRequest) returns(TsCmdCtrlResponse);
+    rpc Lock(LockRequest) returns(LockResponse);
 }
 option cc_generic_services = true;

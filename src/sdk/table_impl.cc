@@ -427,28 +427,6 @@ void TableImpl::ScanCallBack(ScanTask* scan_task,
 void TableImpl::SetReadTimeout(int64_t timeout_ms) {
 }
 
-bool TableImpl::BeginTransaction() {
-    MutexLock l(&_txn_mutex);
-    if (_in_txn) {
-        return false;
-    }
-    _in_txn = true;
-    _txn_id++;
-}
-
-bool TableImpl::Commit() {
-
-}
-
-void TableImpl::Rollback() {
-
-}
-
-bool TableImpl::LockRow(const std::string& rowkey, RowLock* lock, ErrorCode* err) {
-    err->SetFailed(ErrorCode::kNotImpl);
-    return false;
-}
-
 bool TableImpl::GetStartEndKeys(std::string* start_key, std::string* end_key,
                                 ErrorCode* err) {
     err->SetFailed(ErrorCode::kNotImpl);
@@ -1184,6 +1162,194 @@ void TableImpl::ReaderTimeout(int64_t reader_id) {
     _perf_counter.user_callback_cnt.Inc();
     // only for flow control
     _cur_reader_pending_counter.Dec();
+}
+
+bool TableImpl::StartTransaction() {
+    MutexLock l(&_txn_mutex);
+    if (_in_txn) {
+        return false;
+    }
+    _in_txn = true;
+    _txn_id++;
+}
+
+bool TableImpl::Commit() {
+
+}
+
+void TableImpl::Rollback() {
+
+}
+
+RowLock* TableImpl::NewRowLock(const std::string& row_key) {
+    int64_t lock_id = GetUUID();
+    return new RowLockImpl(this, row_key, lock_id);
+}
+
+bool TableImpl::LockRow(RowLock* lock, RowLock::Type lock_type, ErrorCode* err) {
+    RowLockImpl* row_lock = (RowLockImpl*)lock;
+    uint64_t lock_id = row_lock->LockId();
+    std::string& row_key = row_lock->RowKey();
+    RowLockImpl::LockState lock_state = row_lock->LockState();
+    bool is_async = row_lock->IsAsync();
+    int64_t timeout = row_lock->TimeOut() > 0 ? row_lock->TimeOut() : _timeout;
+    RowLockImpl::LockAction lock_action = 0;
+
+    // valid check
+    if (lock_type == RowLock::kSharedLock) {
+        CHECK_EQ(lock_state, RowLockImpl::kUnlocked);
+        lock_action = RowLockImpl::kTrySharedLock;
+        VLOG(10) << "try shared lock " << lock_id << " row " << row_key;
+    } else if (lock_type == RowLock::kExclusiveLock) {
+        if (lock_state == RowLockImpl::kUnlocked) {
+            VLOG(10) << "try exlusive lock " << lock_id << " row " << row_key;
+        } else if (lock_state == RowLockImpl::kSharedLocked) {
+            VLOG(10) << "try upgrade lock " << lock_id << " row " << row_key;
+        } else {
+            CHECK(false);
+        }
+        lock_action = RowLockImpl::kTryExclusiveLock;
+    } else {
+        CHECK(false);
+    }
+
+    // timeout manage
+    _task_pool.PutTask(row_lock);
+    if (timeout >= 0) {
+        ThreadPool::Task task =
+            boost::bind(&TableImpl::LockTimeout, this, row_lock->GetId());
+        _thread_pool->DelayTask(timeout, task);
+    }
+
+    //
+    InternalLockRow(row_lock, lock_action);
+
+    // wait rpc finish
+    if (!is_async) {
+        row_lock->Wait();
+    }
+}
+
+void TableImpl::DistributeLockRow(RowLockImpl* row_lock, RowLockImpl::Action lock_action) {
+    // get meta
+    std::string server_addr;
+    if (!GetTabletAddrOrScheduleUpdateMeta(row_reader->RowName(), row_lock,
+                                           &server_addr)) {
+        continue;
+    }
+
+    // send rpc
+    CommitLock(server_addr, row_lock, lock_action);
+}
+
+void TableImpl::DistributeLockRowById(int64_t lock_id, RowLockImpl::Action lock_action) {
+    SdkTask* task = _task_pool.GetTask(lock_id);
+    if (task == NULL) {
+        VLOG(10) << "lock " << lock_id << " timeout: " << DebugString(row_key);
+    } else {
+        CHECK_EQ(task->Type(), SdkTask::LOCK);
+        RowLockImpl* row_lock = (RowLockImpl*)task;
+        DistributeLockRow(row_lock, lock_action);
+    }
+}
+
+void TableImpl::CommitLock(const std::string& server_addr, RowLockImpl* row_lock,
+                           RowLockImpl::LockAction lock_action) {
+    tabletnode::TabletNodeClient tabletnode_client_async(server_addr);
+    LockRequest* request = new LockRequest;
+    LockResponse* response = new LockResponse;
+    request->set_sequence_id(_last_sequence_id++);
+    request->set_tablet_name(_name);
+    request->set_lock_action(lock_action);
+    request->set_session_id(row_lock->LockId());
+    request->set_row_key(row_lock->RowKey());
+
+    Closure<void, LockRequest*, LockResponse*, bool, int>* done =
+        NewClosure(this, &TableImpl::LockCallback, row_lock->LockId(), lock_action);
+    tabletnode_client_async.LockTablet(request, response, done);
+
+    row_lock->DecRef();
+}
+
+void TableImpl::LockCallback(int64_t lock_id, RowLockImpl::LockAction lock_action,
+                             RowLockRequest* request, LockResponse* response,
+                             bool failed, int error_code) {
+    if (failed) {
+        if (error_code == sofa::pbrpc::RPC_ERROR_SERVER_SHUTDOWN ||
+            error_code == sofa::pbrpc::RPC_ERROR_SERVER_UNREACHABLE ||
+            error_code == sofa::pbrpc::RPC_ERROR_SERVER_UNAVAILABLE) {
+            response->set_status(kServerError);
+        } else if (error_code == sofa::pbrpc::RPC_ERROR_REQUEST_CANCELED ||
+                   error_code == sofa::pbrpc::RPC_ERROR_SEND_BUFFER_FULL) {
+            response->set_status(kClientError);
+        } else if (error_code == sofa::pbrpc::RPC_ERROR_CONNECTION_CLOSED ||
+                   error_code == sofa::pbrpc::RPC_ERROR_RESOLVE_ADDRESS) {
+            response->set_status(kConnectError);
+        } else if (error_code == sofa::pbrpc::RPC_ERROR_REQUEST_TIMEOUT) {
+            response->set_status(kRPCTimeout);
+        } else {
+            response->set_status(kRPCError);
+        }
+    }
+
+    StatusCode err = response->status();
+    const std::string& row_key = request->row_key();
+    if (err == kTabletNodeOk) {
+        SdkTask* task = _task_pool.PopTask(lock_id);
+        if (task == NULL) {
+            VLOG(10) << "lock " << lock_id << " success but timeout: " << DebugString(row_key);
+        } else {
+            VLOG(10) << "lock " << lock_id << " success " << DebugString(row_key);
+            CHECK_EQ(task->Type(), SdkTask::LOCK);
+            CHECK_EQ(task->GetRef(), 1);
+            RowLockImpl* row_lock = (RowLockImpl*)task;
+            row_lock->SetError(ErrorCode::kOK);
+            row_lock->RunCallback();
+        }
+    } else {
+        VLOG(10) << "fail to lock table: " << _name
+            << " row: " << DebugString(row_key)
+            << " errcode: " << StatusCodeToString(err);
+
+        SdkTask* task = _task_pool.GetTask(lock_id);
+        if (task == NULL) {
+            VLOG(10) << "lock " << lock_id << " timeout: " << DebugString(row_key);
+        } else {
+            CHECK_EQ(task->Type(), SdkTask::LOCK);
+            RowLockImpl* row_lock = (RowLockImpl*)task;
+            row_lock->SetInternalError(err);
+
+            if (err == kKeyNotInRange) {
+                row_lock->IncRetryTimes();
+                DistributeLockRow(row_lock, lock_action);
+            } else {
+                row_lock->IncRetryTimes();
+                int64_t retry_interval =
+                    static_cast<int64_t>(pow(FLAGS_tera_sdk_delay_send_internal, row_lock->RetryTimes()) * 1000);
+                ThreadPool::Task retry_task =
+                    boost::bind(&TableImpl::DistributeLockRowById, this, lock_id, lock_action);
+                row_lock->DecRef();
+                _thread_pool->DelayTask(retry_interval, retry_task);
+            }
+        }
+    }
+
+    delete request;
+    delete response;
+}
+
+bool TableImpl::UnlockRow(RowLock* row_lock, ErrorCode* err) {
+    CHECK_EQ(row_lock->LockType(), RowLockImpl::kLocked);
+    err->SetFailed(ErrorCode::kNotImpl);
+    return false;
+}
+
+void TableImpl::CommitLock() {
+
+}
+
+void TableImpl::LockCallback() {
+
 }
 
 bool TableImpl::GetTabletMetaForKey(const std::string& key, TabletMeta* meta) {

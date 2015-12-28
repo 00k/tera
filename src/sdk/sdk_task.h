@@ -20,7 +20,8 @@ public:
     enum TYPE {
         READ,
         MUTATION,
-        SCAN
+        SCAN,
+        LOCK
     };
     TYPE Type() { return _type; }
 

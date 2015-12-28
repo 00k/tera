@@ -287,9 +287,6 @@ private:
     ScanDescImpl* _impl;
 };
 
-class RowLock {
-};
-
 class Table;
 /// 修改操作
 class RowMutation {
@@ -506,15 +503,56 @@ struct TabletInfo {
     std::string status;
 };
 
+class RowLock {
+public:
+    enum Type {
+        kSharedLock = 0,
+        kExclusiveLock = 1
+    };
+
+    RowLock();
+    virtual ~RowLock();
+
+    /// 返回row_key
+    virtual const std::string& RowKey() = 0;
+
+    /// 设置异步回调, 操作会异步返回
+    typedef void (*Callback)(RowLock* row_lock) = 0;
+    virtual void SetCallBack(Callback callback) = 0;
+    /// 获得回调函数
+    virtual Callback GetCallBack() = 0;
+
+    /// 设置用户上下文，可在回调函数中获取
+    virtual void SetContext(void* context) = 0;
+    /// 获得用户上下文
+    virtual void* GetContext() = 0;
+
+    /// 设置超时时间
+    virtual void SetTimeOut(int64_t timeout_ms) = 0;
+    /// 获得超时时间
+    virtual int64_t TimeOut() = 0;
+
+    /// 获得错误码
+    virtual const ErrorCode& GetError() = 0;
+
+    /// 等待结束
+    virtual void Wait() = 0;
+
+private:
+    RowLock(const RowLock&);
+    void operator=(const RowLock&);
+};
+
 /// 表接口
 class Table {
 public:
     Table() {}
     virtual ~Table() {}
+
+    /////////////////////////  写操作  /////////////////////////
+
     /// 返回一个新的RowMutation
     virtual RowMutation* NewRowMutation(const std::string& row_key) = 0;
-    /// 返回一个新的RowReader
-    virtual RowReader* NewRowReader(const std::string& row_key) = 0;
     /// 提交一个修改操作, 同步操作返回是否成功, 异步操作永远返回true
     virtual void ApplyMutation(RowMutation* row_mu) = 0;
     /// 提交一批修改操作, 多行之间不保证原子性, 通过RowMutation的GetError获取各自的返回码
@@ -543,18 +581,29 @@ public:
     virtual bool AddInt64(const std::string& row_key, const std::string& family,
                      const std::string& qualifier, int64_t delta,
                      ErrorCode* err) = 0;
-
     /// 原子操作：如果不存在才能Put成功
     virtual bool PutIfAbsent(const std::string& row_key,
                              const std::string& family,
                              const std::string& qualifier,
                              const std::string& value,
                              ErrorCode* err) = 0;
-
     /// 原子操作：追加内容到一个Cell
     virtual bool Append(const std::string& row_key, const std::string& family,
                         const std::string& qualifier, const std::string& value,
                         ErrorCode* err) = 0;
+    /// 条件修改, 指定Cell的值为value时, 才执行row_mu
+    virtual bool CheckAndApply(const std::string& rowkey, const std::string& cf_c,
+                               const std::string& value, const RowMutation& row_mu,
+                               ErrorCode* err) = 0;
+    /// 计数器++操作
+    virtual int64_t IncrementColumnValue(const std::string& row, const std::string& family,
+                                         const std::string& qualifier, int64_t amount,
+                                         ErrorCode* err) = 0;
+
+    /////////////////////////  读操作  /////////////////////////
+
+    /// 返回一个新的RowReader
+    virtual RowReader* NewRowReader(const std::string& row_key) = 0;
     /// 读取一个指定行
     virtual void Get(RowReader* row_reader) = 0;
     /// 读取多行
@@ -568,51 +617,55 @@ public:
                      const std::string& qualifier, int64_t* value,
                      ErrorCode* err, uint64_t snapshot_id = 0) = 0;
 
-    virtual bool IsPutFinished() = 0;
-    virtual bool IsGetFinished() = 0;
+    /////////////////////////  扫描操作  /////////////////////////
 
     /// Scan, 流式读取, 返回一个数据流, 失败返回NULL
     virtual ResultStream* Scan(const ScanDescriptor& desc, ErrorCode* err) = 0;
 
-    virtual const std::string GetName() = 0;
-
-    virtual bool Flush() = 0;
-    /// 条件修改, 指定Cell的值为value时, 才执行row_mu
-    virtual bool CheckAndApply(const std::string& rowkey, const std::string& cf_c,
-                               const std::string& value, const RowMutation& row_mu,
-                               ErrorCode* err) = 0;
-    /// 计数器++操作
-    virtual int64_t IncrementColumnValue(const std::string& row, const std::string& family,
-                                         const std::string& qualifier, int64_t amount,
-                                         ErrorCode* err) = 0;
-    /// 设置表格写操作默认超时
-    virtual void SetWriteTimeout(int64_t timeout_ms) = 0;
-    virtual void SetReadTimeout(int64_t timeout_ms) = 0;
+    /////////////////////////  事务操作  /////////////////////////
 
     /// 开始事务
-    virtual bool BeginTransaction() = 0;
-
+    virtual bool StartTransaction() = 0;
     /// 提交事务
     virtual bool Commit() = 0;
-
     /// 回滚事务
     virtual void Rollback() = 0;
-
+    /// 返回一个新的行锁，使用完毕需要自行delete
+    virtual RowLock* NewRowLock(const std::string& row_key, LockType lock_type) = 0;
     /// 创建行锁
-    virtual bool LockRow(const std::string& rowkey, RowLock* lock, ErrorCode* err) = 0;
+    virtual bool LockRow(RowLock* row_lock, LockType lock_type, ErrorCode* err) = 0;
+    /// 释放行锁
+    virtual bool UnlockRow(RowLock* row_lock, ErrorCode* err) = 0;
 
+    /////////////////////////  表格信息  /////////////////////////
+
+    /// 获得表名
+    virtual const std::string GetName() = 0;
     /// 获取表格的最小最大key
     virtual bool GetStartEndKeys(std::string* start_key, std::string* end_key,
                                  ErrorCode* err) = 0;
-
     /// 获取表格分布信息
     virtual bool GetTabletLocation(std::vector<TabletInfo>* tablets,
                                    ErrorCode* err) = 0;
     /// 获取表格描述符
     virtual bool GetDescriptor(TableDescriptor* desc, ErrorCode* err) = 0;
 
+    /////////////////////////  杂项  /////////////////////////
+
+    /// 暂未实现
+    virtual bool Flush() = 0;
+
+    /// 设置表格写操作默认超时
+    virtual void SetWriteTimeout(int64_t timeout_ms) = 0;
+    virtual void SetReadTimeout(int64_t timeout_ms) = 0;
+
+    /// 设置读写操作最大pending数量
     virtual void SetMaxMutationPendingNum(uint64_t max_pending_num) = 0;
     virtual void SetMaxReaderPendingNum(uint64_t max_pending_num) = 0;
+
+    /// 读写操作是否全部完成
+    virtual bool IsPutFinished() = 0;
+    virtual bool IsGetFinished() = 0;
 
 private:
     Table(const Table&);

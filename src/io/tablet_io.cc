@@ -24,6 +24,7 @@
 #include "leveldb/env_flash.h"
 #include "leveldb/env_inmem.h"
 #include "leveldb/filter_policy.h"
+#include "sdk/tera.h"
 #include "types.h"
 #include "utils/counter.h"
 #include "utils/scan_filter.h"
@@ -63,6 +64,8 @@ DECLARE_int32(tera_memenv_block_cache_size);
 DECLARE_bool(tera_tablet_use_memtable_on_leveldb);
 DECLARE_int64(tera_tablet_memtable_ldb_write_buffer_size);
 DECLARE_int64(tera_tablet_memtable_ldb_block_size);
+
+DECLARE_int64(tera_sdk_perf_counter_log_interval);
 
 extern tera::Counter row_read_delay;
 
@@ -652,6 +655,8 @@ inline bool TabletIO::LowLevelScan(const std::string& start_tera_key,
     std::string last_key, last_col, last_qual;
     uint32_t buffer_size = 0;
     uint32_t version_num = 1;
+    std::set<int64_t> uncommit_txn_id;
+    std::set<int64_t> commit_txn_id;
     uint64_t nr_scan_round = 0;
     value_list->clear_key_values();
     *read_row_count = 0;
@@ -669,12 +674,64 @@ inline bool TabletIO::LowLevelScan(const std::string& start_tera_key,
         now_time = GetTimeStampInMs();
 
         leveldb::Slice tera_key = it->key();
-        leveldb::Slice value = it->value();
-        leveldb::Slice key, col, qual;
+        leveldb::Slice tera_value = it->value();
+        leveldb::Slice key, col, qual, value;
         int64_t ts = 0;
+        int64_t txn_id = 0;
         leveldb::TeraKeyType type;
         if (!m_key_operator->ExtractTeraKey(tera_key, &key, &col, &qual, &ts, &type)) {
             LOG(WARNING) << "invalid tera key: " << DebugString(tera_key.ToString());
+            it->Next();
+            continue;
+        }
+
+        VLOG(10) << "ll-scan: " << "tablet=[" << m_tablet_path
+            << "] key=[" << DebugString(key.ToString())
+            << "] column=[" << DebugString(col.ToString())
+            << ":" << DebugString(qual.ToString())
+            << "] ts=[" << ts << "] type=[" << type << "]";
+
+        if (now_time > time_out) {
+            VLOG(9) << "ll-scan timeout. Mark next start key: " << DebugString(tera_key.ToString());
+            MakeKvPair(key, col, qual, ts, "", &next_start_kv_pair);
+            break;
+        }
+
+        if (end_row_key.size() && key.compare(end_row_key) >= 0) {
+            // scan finished
+            break;
+        }
+
+        m_key_operator->ExtractTeraValue(tera_value, &txn_id, &value);
+        if (type == leveldb::TKT_TXN_COMMIT) {
+            commit_txn_id.insert(txn_id);
+            VLOG(10) << "ll-scan: commit txn id " << std::ios::hex << txn_id;
+            it->Next();
+            continue;
+        }
+
+        char txn_id_str[8];
+        memcpy(txn_id_str, &txn_id, 8);
+        ErrorCode err;
+        std::string tmp_txn_value;
+        Table* txn_table = GetTransactionTable();
+        if (type == leveldb::TKT_TXN) {
+            if (commit_txn_id.find(txn_id) != commit_txn_id.end()) {
+                VLOG(10) << "ll-scan: ignore uncommit txn id " << std::ios::hex << txn_id;
+            } else if (txn_table != NULL &&
+                       !txn_table->Get(std::string(txn_id_str, 8), "", "", &tmp_txn_value, &err) &&
+                       err.GetType() == ErrorCode::kNotFound) {
+                VLOG(10) << "ll-scan: ignore uncommit txn id, commit interupt" << std::ios::hex << txn_id;
+            } else {
+                uncommit_txn_id.insert(txn_id);
+                VLOG(10) << "ll-scan: add uncommit txn id " << std::ios::hex << txn_id;
+            }
+            it->Next();
+            continue;
+        }
+
+        if (txn_id != 0 && uncommit_txn_id.find(txn_id) != uncommit_txn_id.end()) {
+            VLOG(10) << "ll-scan: shadow uncommit data";
             it->Next();
             continue;
         }
@@ -690,23 +747,6 @@ inline bool TabletIO::LowLevelScan(const std::string& start_tera_key,
                 << ", qual " << DebugString(qual.ToString());
             it->Next();
             continue;
-        }
-
-        if (now_time > time_out) {
-            VLOG(9) << "ll-scan timeout. Mark next start key: " << DebugString(tera_key.ToString());
-            MakeKvPair(key, col, qual, ts, "", &next_start_kv_pair);
-            break;
-        }
-
-        VLOG(10) << "ll-scan: " << "tablet=[" << m_tablet_path
-            << "] key=[" << DebugString(key.ToString())
-            << "] column=[" << DebugString(col.ToString())
-            << ":" << DebugString(qual.ToString())
-            << "] ts=[" << ts << "] type=[" << type << "]";
-
-        if (end_row_key.size() && key.compare(end_row_key) >= 0) {
-            // scan finished
-            break;
         }
 
         const std::set<std::string>& cf_set = scan_options.iter_cf_set;
@@ -747,6 +787,8 @@ inline bool TabletIO::LowLevelScan(const std::string& start_tera_key,
             *read_row_count += 1;
             ProcessRowBuffer(row_buf, scan_options, value_list, &buffer_size);
             row_buf.clear();
+            uncommit_txn_id.clear();
+            commit_txn_id.clear();
         }
 
         // max version filter
@@ -1158,13 +1200,119 @@ bool TabletIO::Write(const WriteTabletRequest* request,
         }
         m_db_ref_count++;
     }
-    m_async_writer->Write(request, response, done, index_list,
-                          done_counter, timer);
+
+    std::vector<int32_t>* write_index_list = new std::vector<int32_t>;
+    int32_t index_num = index_list->size();
+    for (int32_t i = 0; i < index_num; i++) {
+        int32_t index = (*index_list)[i];
+        const RowMutationSequence& row_mu = request->row_list(index);
+        if (row_mu.mutation_sequence_size() == 1) {
+            const Mutation& mu = row_mu.mutation_sequence(0);
+            const std::string& row_key = row_mu.row_key();
+            const std::string& lock_type = mu.qualifier();
+            const std::string& lock_id = mu.value();
+            if (mu.family() == "LOCK") {
+                response->mutable_row_status_list()->Set(index, LockRow(row_key, lock_type, lock_id));
+            } else if (mu.family() == "UNLOCK") {
+                response->mutable_row_status_list()->Set(index, UnlockRow(row_key, lock_id));
+            } else {
+                write_index_list->push_back(index);
+            }
+        } else {
+            write_index_list->push_back(index);
+        }
+    }
+
+    delete index_list;
+    int write_index_num = write_index_list->size();
+    if (done_counter->Add(index_num - write_index_num) == request->row_list_size()) {
+        done->Run();
+        delete done_counter;
+        if (NULL != timer) {
+            RpcTimerList::Instance()->Erase(timer);
+            delete timer;
+        }
+    }
+
+    if (write_index_num > 0) {
+        m_async_writer->Write(request, response, done, write_index_list,
+                              done_counter, timer);
+    } else {
+        delete write_index_list;
+    }
+
     {
         MutexLock lock(&m_mutex);
         m_db_ref_count--;
     }
     return true;
+}
+
+StatusCode TabletIO::LockRow(const std::string& row_key, const std::string& lock_type,
+                             const std::string& lock_id) {
+    MutexLock lock(&m_lock_mutex);
+    RowLockMap::iterator it = m_locks.find(row_key);
+    if (it == m_locks.end()) {
+        std::set<std::string> lock_id_set;
+        lock_id_set.insert(lock_id);
+        m_locks[row_key] = make_pair(lock_type, lock_id_set);
+        VLOG(10) << "new " << lock_type << " lock: id " << lock_id;
+        return kTabletNodeOk;
+    }
+
+    std::string& owner_type = it->second.first;
+    std::set<std::string>& owner_id_set = it->second.second;
+    if (owner_type == "S") {
+        if (lock_type == "S") {
+            owner_id_set.insert(lock_id);
+            VLOG(10) << "add S lock: id " << lock_id;
+            return kTabletNodeOk;
+        } else if (owner_id_set.size() == 1 && *owner_id_set.begin() == lock_id) {
+            owner_type = "X";
+            VLOG(10) << "update S lock to X lock: id " << lock_id;
+            return kTabletNodeOk;
+        } else {
+            CHECK_GE(owner_id_set.size(), 1);
+            VLOG(10) << "wait " << lock_type << " lock: id " << lock_id
+                     << " type S owner " << *owner_id_set.begin();
+            return kTabletNodeIsBusy;
+        }
+    } else {
+        CHECK_EQ(owner_id_set.size(), 1);
+        if (*owner_id_set.begin() == lock_id) {
+            VLOG(10) << "add X lock: id " << lock_id;
+            return kTabletNodeOk;
+        } else {
+            VLOG(10) << "wait " << lock_type << " lock: id " << lock_id
+                     << " type X owner " << *owner_id_set.begin();
+            return kTabletNodeIsBusy;
+        }
+    }
+}
+
+StatusCode TabletIO::UnlockRow(const std::string& row_key, const std::string& lock_id) {
+    MutexLock lock(&m_lock_mutex);
+    RowLockMap::iterator it = m_locks.find(row_key);
+    if (it == m_locks.end()) {
+        VLOG(10) << "unlock non exist lock: id " << lock_id;
+        return kTabletNodeOk;
+    }
+
+    std::string& owner_type = it->second.first;
+    std::set<std::string>& owner_id_set = it->second.second;
+    if (owner_id_set.find(lock_id) == owner_id_set.end()) {
+        VLOG(10) << "unlock not owned lock: id " << lock_id;
+        return kTabletNodeOk;
+    }
+
+    owner_id_set.erase(lock_id);
+    VLOG(10) << "unlock " << owner_type << " lock: id" << lock_id
+             << " left " << owner_id_set.size() << " owners";
+
+    if (owner_id_set.size() == 0) {
+        m_locks.erase(row_key);
+    }
+    return kTabletNodeOk;
 }
 
 bool TabletIO::ScanRows(const ScanTabletRequest* request,
@@ -1462,6 +1610,7 @@ void TabletIO::SetupScanRowOptions(const ScanTabletRequest* request,
     }
     scan_options->version_num = 0;
     scan_options->snapshot_id = request->snapshot_id();
+    scan_options->txn_id = request->transaction_id();
 }
 
 void TabletIO::SetupOptionsForLG() {
@@ -1867,6 +2016,30 @@ int32_t TabletIO::DecRef() {
 
 int32_t TabletIO::GetRef() const {
     return m_ref_count;
+}
+
+Mutex TabletIO::m_txn_mutex;
+Client* TabletIO::m_txn_client = NULL;
+Table* TabletIO::m_txn_table = NULL;
+
+Table* TabletIO::GetTransactionTable() {
+    MutexLock l(&m_txn_mutex);
+    if (m_txn_table == NULL) {
+        if (m_txn_client == NULL) {
+            m_txn_client = Client::NewClient();
+        }
+        if (m_txn_client != NULL) {
+            FLAGS_tera_sdk_perf_counter_log_interval = 60;
+            ErrorCode err;
+            m_txn_table = m_txn_client->OpenTable(kTransactionTableName, &err);
+            if (m_txn_table != NULL) {
+                VLOG(10) << "open txn table";
+            } else {
+                LOG(ERROR) << "fail to open txn table: " << err.GetReason();
+            }
+        }
+    }
+    return m_txn_table;
 }
 
 } // namespace io

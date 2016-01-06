@@ -89,6 +89,10 @@ public:
     virtual bool Rollback(const string& name, uint64_t snapshot,
                           const std::string& rollback_name, ErrorCode* err);
 
+    virtual bool StartTransaction(int isolation_level);
+    virtual bool CommitTransaction();
+    virtual bool RollbackTransaction();
+
     virtual bool CmdCtrl(const string& command,
                          const std::vector<string>& arg_list,
                          bool* bool_result,
@@ -118,6 +122,9 @@ public:
 
     std::string GetZkAddrList() { return _zk_addr_list; }
     std::string GetZkRootPath() { return _zk_root_path; }
+
+public:
+    int64_t TransactionId();
 
 private:
     bool ListInternal(std::vector<TableInfo>* table_list,
@@ -163,6 +170,14 @@ private:
     /// if there is _cluster,
     ///    we save master_addr & root_table_addr in _cluster, access zookeeper only once.
     sdk::ClusterFinder* _cluster;
+
+    /// transaction
+    mutable Mutex _txn_mutex;
+    bool _in_txn;
+    int64_t _txn_id;
+    int _txn_iso_level;
+    std::string _txn_id_str;
+    Table* _txn_table;
 };
 
 } // namespace tera

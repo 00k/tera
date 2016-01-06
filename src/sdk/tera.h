@@ -288,6 +288,8 @@ private:
 };
 
 class Table;
+class RowLock;
+
 /// 修改操作
 class RowMutation {
 public:
@@ -516,28 +518,6 @@ public:
     /// 返回row_key
     virtual const std::string& RowKey() = 0;
 
-    /// 设置异步回调, 操作会异步返回
-    typedef void (*Callback)(RowLock* row_lock) = 0;
-    virtual void SetCallBack(Callback callback) = 0;
-    /// 获得回调函数
-    virtual Callback GetCallBack() = 0;
-
-    /// 设置用户上下文，可在回调函数中获取
-    virtual void SetContext(void* context) = 0;
-    /// 获得用户上下文
-    virtual void* GetContext() = 0;
-
-    /// 设置超时时间
-    virtual void SetTimeOut(int64_t timeout_ms) = 0;
-    /// 获得超时时间
-    virtual int64_t TimeOut() = 0;
-
-    /// 获得错误码
-    virtual const ErrorCode& GetError() = 0;
-
-    /// 等待结束
-    virtual void Wait() = 0;
-
 private:
     RowLock(const RowLock&);
     void operator=(const RowLock&);
@@ -622,18 +602,12 @@ public:
     /// Scan, 流式读取, 返回一个数据流, 失败返回NULL
     virtual ResultStream* Scan(const ScanDescriptor& desc, ErrorCode* err) = 0;
 
-    /////////////////////////  事务操作  /////////////////////////
+    /////////////////////////  锁操作  /////////////////////////
 
-    /// 开始事务
-    virtual bool StartTransaction() = 0;
-    /// 提交事务
-    virtual bool Commit() = 0;
-    /// 回滚事务
-    virtual void Rollback() = 0;
     /// 返回一个新的行锁，使用完毕需要自行delete
-    virtual RowLock* NewRowLock(const std::string& row_key, LockType lock_type) = 0;
+    virtual RowLock* NewRowLock(const std::string& row_key) = 0;
     /// 创建行锁
-    virtual bool LockRow(RowLock* row_lock, LockType lock_type, ErrorCode* err) = 0;
+    virtual bool LockRow(RowLock* row_lock, RowLock::Type lock_type, ErrorCode* err) = 0;
     /// 释放行锁
     virtual bool UnlockRow(RowLock* row_lock, ErrorCode* err) = 0;
 
@@ -670,6 +644,13 @@ public:
 private:
     Table(const Table&);
     void operator=(const Table&);
+};
+
+enum IsolationLevel {
+    kReadUncommitted = 0,
+    kReadCommitted = 1,
+    kRepeatableRead = 2,
+    kSerialize = 3
 };
 
 class Client {
@@ -740,6 +721,10 @@ public:
     virtual bool DelSnapshot(const std::string& name, uint64_t snapshot,ErrorCode* err) = 0;
     virtual bool Rollback(const std::string& name, uint64_t snapshot,
                           const std::string& rollback_name, ErrorCode* err) = 0;
+
+    virtual bool StartTransaction(int isolation_level) = 0;
+    virtual bool CommitTransaction() = 0;
+    virtual bool RollbackTransaction() = 0;
 
     virtual bool CmdCtrl(const std::string& command,
                          const std::vector<std::string>& arg_list,

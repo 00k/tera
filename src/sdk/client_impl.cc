@@ -18,6 +18,7 @@
 #include "sdk/table_impl.h"
 #include "sdk/sdk_utils.h"
 #include "sdk/sdk_zk.h"
+#include "types.h"
 #include "utils/config_utils.h"
 #include "utils/crypt.h"
 #include "utils/string_util.h"
@@ -60,6 +61,9 @@ ClientImpl::ClientImpl(const std::string& user_identity,
         FLAGS_tera_sdk_rpc_limit_enabled ? FLAGS_tera_sdk_rpc_limit_max_outflow : -1,
         FLAGS_tera_sdk_rpc_max_pending_buffer_size, FLAGS_tera_sdk_rpc_work_thread_num);
     _cluster = new sdk::ClusterFinder(zk_root_path, zk_addr_list);
+    ErrorCode err;
+    _txn_table = OpenTable(kTransactionTableName, &err);
+    CHECK(_txn_table);
 }
 
 ClientImpl::~ClientImpl() {
@@ -428,7 +432,7 @@ Table* ClientImpl::OpenTable(const std::string& table_name,
     err->SetFailed(ErrorCode::kOK);
     TableImpl* table = new TableImpl(internal_table_name,
                                      _zk_root_path, _zk_addr_list,
-                                     &_thread_pool, _cluster);
+                                     &_thread_pool, _cluster, this);
     if (table == NULL) {
         std::string reason = "fail to new TableImpl";
         if (err != NULL) {
@@ -861,6 +865,89 @@ bool ClientImpl::Rollback(const string& name, uint64_t snapshot,
     err->SetFailed(ErrorCode::kSystem, StatusCodeToString(response.status()));
     std::cout << name << " rollback to snapshot failed";
     return false;
+}
+
+bool ClientImpl::StartTransaction(int isolation_level) {
+    CHECK_GE(isolation_level, 0);
+    CHECK_LE(isolation_level, 3);
+    MutexLock l(&_txn_mutex);
+    if (_in_txn) {
+        VLOG(10) << "cannot start a transaction in another transaction";
+        return false;
+    }
+
+    _txn_id = Uuid8(&_txn_id_str);
+    RowMutation* row_mu = _txn_table->NewRowMutation(_txn_id_str);
+    row_mu->Put("Y");
+    _txn_table->ApplyMutation(row_mu);
+    ErrorCode err = row_mu->GetError();
+    delete row_mu;
+
+    if (err.GetType() != ErrorCode::kOK) {
+        VLOG(10) << "fail to start transaction " << std::hex << _txn_id << " " << err.GetReason();
+        return false;
+    }
+
+    VLOG(10) << "start trasacntion " << std::hex << _txn_id;
+    _in_txn = true;
+    _txn_iso_level = isolation_level;
+    return true;
+}
+
+bool ClientImpl::CommitTransaction() {
+    MutexLock l(&_txn_mutex);
+    if (!_in_txn) {
+        VLOG(10) << "commit pass, not in a transaction";
+        return true;
+    }
+
+    RowMutation* row_mu = _txn_table->NewRowMutation(_txn_id_str);
+    row_mu->DeleteRow();
+    _txn_table->ApplyMutation(row_mu);
+    ErrorCode err = row_mu->GetError();
+    delete row_mu;
+
+    if (err.GetType() != ErrorCode::kOK) {
+        VLOG(10) << "fail to commit transaction " << std::hex << _txn_id << " " << err.GetReason();
+        return false;
+    }
+
+    VLOG(10) << "commit trasanction " << std::hex << _txn_id;
+    _in_txn = false;
+    return false;
+}
+
+bool ClientImpl::RollbackTransaction() {
+    MutexLock l(&_txn_mutex);
+    if (!_in_txn) {
+        VLOG(10) << "rollback pass, not in a transaction";
+        return true;
+    }
+
+    RowMutation* row_mu = _txn_table->NewRowMutation(_txn_id_str);
+    row_mu->Put("N");
+    _txn_table->ApplyMutation(row_mu);
+    ErrorCode err = row_mu->GetError();
+    delete row_mu;
+
+    if (err.GetType() != ErrorCode::kOK) {
+        VLOG(10) << "fail to rollback transaction " << std::hex << _txn_id << " " << err.GetReason();
+        return false;
+    }
+
+    VLOG(10) << "rollback trasanction " << std::hex << _txn_id;
+
+    _in_txn = false;
+    return false;
+}
+
+int64_t ClientImpl::TransactionId() {
+    MutexLock l(&_txn_mutex);
+    int64_t txn_id = 0;
+    if (_in_txn) {
+        txn_id = _txn_id;
+    }
+    return txn_id;
 }
 
 bool ClientImpl::CmdCtrl(const string& command,

@@ -250,9 +250,42 @@ bool TabletWriter::BatchRequest(const WriteTabletRequest& request,
                 batch->Delete(tera_key);
             }
         } else {
+            const Mutation& mu = row_mu.mutation_sequence().Get(0);
+            if (request.transaction_id() != 0) {
+                int64_t timestamp = get_unique_micros(timestamp_old);
+                timestamp_old = timestamp;
+                if (mu.has_timestamp() && mu.timestamp() < timestamp) {
+                    timestamp = mu.timestamp();
+                }
+                leveldb::TeraKeyType type = leveldb::TKT_TXN;
+                if (mu.family() == "COMMIT") {
+                    type = leveldb::TKT_TXN_COMMIT;
+                }
+                std::string tera_key, tera_value;
+                m_tablet->GetRawKeyOperator()->EncodeTeraKey(row_key, "", "",
+                                                             timestamp, type, &tera_key);
+                m_tablet->GetRawKeyOperator()->EncodeTeraValue("", request.transaction_id(),
+                                                               &tera_value);
+                uint32_t lg_id = 0;
+                size_t lg_num = m_tablet->m_ldb_options.exist_lg_list->size();
+                if (lg_num > 1) {
+                    // put txn mark to all LGs
+                    for (lg_id = 0; lg_id < lg_num; ++lg_id) {
+                        std::string tera_key_tmp = tera_key;
+                        leveldb::PutFixed32LGId(&tera_key_tmp, lg_id);
+                        VLOG(10) << "Batch Request, key:" << row_key << ",family:"
+                            << mu.family() << ",lg_id:" << lg_id;
+                        batch->Put(tera_key_tmp, tera_value);
+                    }
+                } else {
+                    VLOG(10) << "Batch Request, key:" << row_key << ",family:"
+                        << mu.family() << ",lg_id:" << lg_id;
+                    batch->Put(tera_key, tera_value);
+                }
+            }
             for (int32_t t = 0; t < mu_num; ++t) {
                 const Mutation& mu = row_mu.mutation_sequence().Get(t);
-                std::string tera_key;
+                std::string tera_key, tera_value;
                 leveldb::TeraKeyType type = leveldb::TKT_VALUE;
                 switch (mu.type()) {
                     case kDeleteRow:
@@ -288,7 +321,9 @@ bool TabletWriter::BatchRequest(const WriteTabletRequest& request,
                     timestamp = mu.timestamp();
                 }
                 m_tablet->GetRawKeyOperator()->EncodeTeraKey(row_key, mu.family(), mu.qualifier(),
-                                                            timestamp, type, &tera_key);
+                                                             timestamp, type, &tera_key);
+                m_tablet->GetRawKeyOperator()->EncodeTeraValue(mu.value(), request.transaction_id(),
+                                                               &tera_value);
                 uint32_t lg_id = 0;
                 size_t lg_num = m_tablet->m_ldb_options.exist_lg_list->size();
                 if (lg_num > 1) {
@@ -297,7 +332,7 @@ bool TabletWriter::BatchRequest(const WriteTabletRequest& request,
                         leveldb::PutFixed32LGId(&tera_key, lg_id);
                         VLOG(10) << "Batch Request, key:" << row_key << ",family:"
                             << mu.family() << ",lg_id:" << lg_id;
-                        batch->Put(tera_key, mu.value());
+                        batch->Put(tera_key, tera_value);
                     } else {
                         // put row_del mark to all LGs
                         for (lg_id = 0; lg_id < lg_num; ++lg_id) {
@@ -305,13 +340,13 @@ bool TabletWriter::BatchRequest(const WriteTabletRequest& request,
                             leveldb::PutFixed32LGId(&tera_key_tmp, lg_id);
                             VLOG(10) << "Batch Request, key:" << row_key << ",family:"
                                 << mu.family() << ",lg_id:" << lg_id;
-                            batch->Put(tera_key_tmp, mu.value());
+                            batch->Put(tera_key_tmp, tera_value);
                         }
                     }
                 } else {
                     VLOG(10) << "Batch Request, key:" << row_key << ",family:"
                         << mu.family() << ",lg_id:" << lg_id;
-                    batch->Put(tera_key, mu.value());
+                    batch->Put(tera_key, tera_value);
                 }
             }
         }

@@ -28,6 +28,10 @@
 #include "utils/rpc_timer_list.h"
 
 namespace tera {
+
+class Client;
+class Table;
+
 namespace io {
 
 class TabletWriter;
@@ -55,10 +59,12 @@ public:
         ColumnFamilyMap column_family_list;
         std::set<std::string> iter_cf_set;
         int64_t timeout;
+        int64_t txn_id;
 
         ScanOptions()
             : max_versions(UINT32_MAX), version_num(0), max_size(UINT32_MAX),
-              ts_start(kOldestTs), ts_end(kLatestTs), snapshot_id(0), timeout(INT64_MAX / 2)
+              ts_start(kOldestTs), ts_end(kLatestTs), snapshot_id(0), timeout(INT64_MAX / 2),
+              txn_id(0)
         {}
     };
 
@@ -140,6 +146,11 @@ public:
                        const std::vector<int32_t>* index_list,
                        Counter* done_counter, WriteRpcTimer* timer = NULL,
                        StatusCode* status = NULL);
+
+    StatusCode LockRow(const std::string& row_key, const std::string& lock_type,
+                       const std::string& lock_id);
+
+    StatusCode UnlockRow(const std::string& row_key, const std::string& lock_id);
 
     virtual bool Scan(const ScanOption& option, KeyValueList* kv_list,
                       bool* complete, StatusCode* status = NULL);
@@ -223,6 +234,8 @@ private:
 
     bool ParseRowKey(const std::string& tera_key, std::string* row_key);
 
+    static Table* GetTransactionTable();
+
 private:
     mutable Mutex m_mutex;
     TabletWriter* m_async_writer;
@@ -251,6 +264,14 @@ private:
     std::map<std::string, uint32_t> m_lg_id_map;
     StreamScanManager m_stream_scan;
     StatCounter m_counter;
+
+    mutable Mutex m_lock_mutex;
+    typedef std::map<std::string, std::pair<std::string, std::set<std::string> > > RowLockMap;
+    RowLockMap m_locks;
+
+    static Mutex m_txn_mutex;
+    static Client* m_txn_client;
+    static Table* m_txn_table;
 };
 
 } // namespace io

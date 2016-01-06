@@ -7,6 +7,9 @@
 #include <cstdio>
 #include <string>
 
+#include <boost/uuid/uuid.hpp>
+#include <boost/uuid/uuid_generators.hpp>
+
 namespace tera {
 
 int32_t GetHashString(const std::string& str, uint32_t seed, std::string* result) {
@@ -59,6 +62,24 @@ int32_t GetHashNumber(const std::string& str, uint32_t seed, uint32_t* result) {
     }
     *result = h;
     return 0;
+}
+
+int64_t Uuid8(char* result) {
+    boost::uuids::uuid u = boost::uuids::random_generator()();
+    int64_t uuid_high = *(int64_t*)(&u + 8);
+    int64_t uuid_low = *(int64_t*)(&u);
+    int64_t uuid8 = (uuid_high ^ uuid_low);
+    if (result != NULL) {
+        memcpy(result, &uuid8, 8);
+    }
+    return uuid8;
+}
+
+int64_t Uuid8(std::string* result) {
+    char uuid8_str[8];
+    int64_t uuid8 = Uuid8(uuid8_str);
+    result->assign(uuid8_str, 8);
+    return uuid8;
 }
 
 } // namespace tera

@@ -28,7 +28,7 @@ PROTO_SRC := $(filter-out %.pb.cc, $(wildcard src/proto/*.cc)) $(PROTO_OUT_CC)
 JNI_TERA_SRC := $(wildcard src/sdk/java/native-src/*.cc)
 VERSION_SRC := src/version.cc
 OTHER_SRC := $(wildcard src/zk/*.cc) $(wildcard src/utils/*.cc) $(VERSION_SRC) \
-	     src/tera_flags.cc
+             src/tera_flags.cc
 COMMON_SRC := $(wildcard src/common/base/*.cc) $(wildcard src/common/net/*.cc) \
               $(wildcard src/common/file/*.cc) $(wildcard src/common/file/recordio/*.cc)
 SERVER_SRC := src/tera_main.cc src/tera_entry.cc
@@ -135,8 +135,9 @@ tprinter_test: src/utils/test/tprinter_test.o $(LIBRARY)
 string_util_test: src/utils/test/string_util_test.o $(LIBRARY)
 	$(CXX) -o $@ $^ $(LDFLAGS)
 
-tablet_io_test: src/io/test/tablet_io_test.o src/tabletnode/tabletnode_sysinfo.o\
-		$(IO_OBJ) $(PROTO_OBJ) $(OTHER_OBJ) $(COMMON_OBJ) $(LEVELDB_LIB)
+tablet_io_test: src/io/test/tablet_io_test.o src/tabletnode/tabletnode_sysinfo.o \
+                $(IO_OBJ) $(PROTO_OBJ) $(OTHER_OBJ) $(COMMON_OBJ) $(LEVELDB_LIB) \
+				$(LIBRARY)
 	$(CXX) -o $@ $^ $(LDFLAGS)
 
 $(ALL_OBJ): %.o: %.cc $(PROTO_OUT_H)

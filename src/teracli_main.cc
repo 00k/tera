@@ -1868,6 +1868,71 @@ int32_t SnapshotOp(Client* client, int32_t argc, char** argv, ErrorCode* err) {
     return 0;
 }
 
+int32_t LockOp(Client* client, int32_t argc, char** argv, ErrorCode* err) {
+    if (argc != 5) {
+        LOG(ERROR) << "args number error: " << argc << ", need 5.";
+        Usage(argv[0]);
+        return -1;
+    }
+
+    std::string tablename = argv[2];
+    std::string rowkey = argv[3];
+    std::string type = argv[4];
+
+    enum RowLock::Type lock_type;
+    if (type == "S") {
+        lock_type = RowLock::kSharedLock;
+    } else if (type == "X") {
+        lock_type = RowLock::kExclusiveLock;
+    } else {
+        std::cout << "illegal lock type, should be S or X" << std::endl;
+        return -1;
+    }
+
+    Table* table = NULL;
+    if ((table = client->OpenTable(tablename, err)) == NULL) {
+        LOG(ERROR) << "fail to open table";
+        return -1;
+    }
+    RowLock* lock = table->NewRowLock(rowkey);
+    if (table->LockRow(lock, lock_type, err)) {
+        std::cout << "lock success" << std::endl;
+    } else {
+        std::cout << "lock fail: " << err->GetReason() << std::endl;
+    }
+
+    delete lock;
+    delete table;
+    return 0;
+}
+
+int32_t UnlockOp(Client* client, int32_t argc, char** argv, ErrorCode* err) {
+    if (argc != 4) {
+        LOG(ERROR) << "args number error: " << argc << ", need 4.";
+        Usage(argv[0]);
+        return -1;
+    }
+
+    std::string tablename = argv[2];
+    std::string rowkey = argv[3];
+
+    Table* table = NULL;
+    if ((table = client->OpenTable(tablename, err)) == NULL) {
+        LOG(ERROR) << "fail to open table";
+        return -1;
+    }
+    RowLock* lock = table->NewRowLock(rowkey);
+    if (table->UnlockRow(lock, err)) {
+        std::cout << "unlock success" << std::endl;
+    } else {
+        std::cout << "unlock fail: " << err->GetReason() << std::endl;
+    }
+
+    delete lock;
+    delete table;
+    return 0;
+}
+
 int32_t SafeModeOp(Client* client, int32_t argc, char** argv, ErrorCode* err) {
     if (argc < 3) {
         UsageMore(argv[0]);
@@ -2604,6 +2669,10 @@ int main(int argc, char* argv[]) {
         PrintSystemVersion();
     } else if (cmd == "snapshot") {
         ret = SnapshotOp(client, argc, argv, &error_code);
+    } else if (cmd == "lock") {
+        ret = LockOp(client, argc, argv, &error_code);
+    } else if (cmd == "unlock") {
+        ret = UnlockOp(client, argc, argv, &error_code);
     } else if (cmd == "help") {
         Usage(argv[0]);
     } else if (cmd == "helpmore") {

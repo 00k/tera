@@ -20,6 +20,10 @@ int32_t GetHashNumber(const std::string& str, uint32_t seed, uint32_t* result);
 
 int32_t GetHashString(const std::string& str, uint32_t seed, std::string* result);
 
+int64_t Uuid8(char* result = NULL);
+
+int64_t Uuid8(std::string* result);
+
 }  // namespace tera
 
 #endif // TERA_UTILS_CRYPT_H

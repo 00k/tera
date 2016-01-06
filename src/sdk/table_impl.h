@@ -26,6 +26,7 @@ namespace tabletnode {
 class TabletNodeClient;
 }
 
+class ClientImpl;
 class RowMutation;
 class RowMutationImpl;
 class ResultStreamImpl;
@@ -87,7 +88,8 @@ public:
               const std::string& zk_root_path,
               const std::string& zk_addr_list,
               ThreadPool* thread_pool,
-              sdk::ClusterFinder* cluster);
+              sdk::ClusterFinder* cluster,
+              ClientImpl* client = NULL);
 
     virtual ~TableImpl();
 
@@ -166,13 +168,9 @@ public:
     virtual void SetWriteTimeout(int64_t timeout_ms);
     virtual void SetReadTimeout(int64_t timeout_ms);
 
-    virtual bool StartTransaction();
-    virtual bool Commit();
-    virtual void Rollback();
-
-    virtual RowLock* NewRowLock(const std::string& row_key, LockType lock_type) = 0;
-    virtual bool LockRow(RowLock* row_lock, ErrorCode* err) = 0;
-    virtual bool UnlockRow(RowLock* row_lock, ErrorCode* err) = 0;
+    virtual RowLock* NewRowLock(const std::string& row_key);
+    virtual bool LockRow(RowLock* row_lock, RowLock::Type lock_type, ErrorCode* err);
+    virtual bool UnlockRow(RowLock* row_lock, ErrorCode* err);
 
     virtual bool GetStartEndKeys(std::string* start_key, std::string* end_key,
                                  ErrorCode* err);
@@ -379,6 +377,7 @@ private:
     };
 
     std::string _name;
+    ClientImpl* _client;
     int64_t _create_time;
     uint64_t _last_sequence_id;
     uint32_t _timeout;
@@ -435,12 +434,6 @@ private:
     /// read request will contain this member,
     /// so tabletnodes can drop the read-request that timeouted
     uint64_t _pending_timeout_ms;
-
-    /// transaction
-    mutable Mutex _txn_mutex;
-    bool _in_txn;
-    uint64_t _txn_id;
-    std::map<std::string, LockType> _row_locks;
 };
 
 } // namespace tera

@@ -3,11 +3,8 @@
 // found in the LICENSE file.
 //
 
-#include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <readline/history.h>
-#include <readline/readline.h>
 
 #include <fstream>
 #include <iostream>
@@ -66,10 +63,6 @@ Mutex g_stat_lock;
 volatile int32_t g_cur_batch_num = 0;
 
 using namespace tera;
-
-typedef std::map<std::string, RowLock*> RowLockMap;
-typedef std::map<std::string, std::pair<Table*, RowLockMap> > TableMap;
-TableMap g_table_cache;
 
 void Usage(const std::string& prg_name) {
     std::cout << "\nSYNOPSIS\n";
@@ -1825,103 +1818,6 @@ int32_t SnapshotOp(Client* client, int32_t argc, char** argv, ErrorCode* err) {
     return 0;
 }
 
-Table* GetTable(Client* client, const std::string& tablename, ErrorCode* err) {
-    if (g_table_cache.find(tablename) == g_table_cache.end()) {
-        Table* table = client->OpenTable(tablename, err);
-        if (table == NULL) {
-            return NULL;
-        }
-        g_table_cache[tablename].first = table;
-    }
-    return g_table_cache[tablename].first;
-}
-
-RowLock* GetRowLock(const std::string& tablename, const std::string& rowkey) {
-    std::pair<Table*, RowLockMap>& table_and_locks = g_table_cache[tablename];
-    Table* table = table_and_locks.first;
-    RowLockMap& table_locks = table_and_locks.second;
-    CHECK(table != NULL);
-    if (table_locks.find(rowkey) == table_locks.end()) {
-        table_locks[rowkey] = table->NewRowLock(rowkey);
-    }
-    return table_locks[rowkey];
-}
-
-void EraseRowLock(const std::string& tablename, const std::string& rowkey) {
-    std::pair<Table*, RowLockMap>& table_and_locks = g_table_cache[tablename];
-    Table* table = table_and_locks.first;
-    RowLockMap& table_locks = table_and_locks.second;
-    CHECK(table != NULL);
-    if (table_locks.find(rowkey) != table_locks.end()) {
-        delete table_locks[rowkey];
-        table_locks.erase(rowkey);
-    }
-}
-
-int32_t LockOp(Client* client, int32_t argc, char** argv, ErrorCode* err) {
-    if (argc != 5) {
-        LOG(ERROR) << "args number error: " << argc << ", need 5.";
-        Usage(argv[0]);
-        return -1;
-    }
-
-    std::string tablename = argv[2];
-    std::string rowkey = argv[3];
-    std::string type = argv[4];
-
-    enum RowLock::Type lock_type;
-    if (type == "S") {
-        lock_type = RowLock::kSharedLock;
-    } else if (type == "X") {
-        lock_type = RowLock::kExclusiveLock;
-    } else {
-        std::cout << "illegal lock type, should be S or X" << std::endl;
-        return -1;
-    }
-
-    Table* table = NULL;
-    if ((table = GetTable(client, tablename, err)) == NULL) {
-        LOG(ERROR) << "fail to open table";
-        return -1;
-    }
-
-    RowLock* lock = GetRowLock(tablename, rowkey);
-    if (table->LockRow(lock, lock_type, err)) {
-        std::cout << "lock success" << std::endl;
-    } else {
-        std::cout << "lock fail: " << err->GetReason() << std::endl;
-    }
-
-    return 0;
-}
-
-int32_t UnlockOp(Client* client, int32_t argc, char** argv, ErrorCode* err) {
-    if (argc != 4) {
-        LOG(ERROR) << "args number error: " << argc << ", need 4.";
-        Usage(argv[0]);
-        return -1;
-    }
-
-    std::string tablename = argv[2];
-    std::string rowkey = argv[3];
-
-    Table* table = NULL;
-    if ((table = GetTable(client, tablename, err)) == NULL) {
-        LOG(ERROR) << "fail to open table";
-        return -1;
-    }
-
-    RowLock* lock = GetRowLock(tablename, rowkey);
-    if (table->UnlockRow(lock, err)) {
-        EraseRowLock(tablename, rowkey);
-        std::cout << "unlock success" << std::endl;
-    } else {
-        std::cout << "unlock fail: " << err->GetReason() << std::endl;
-    }
-
-    return 0;
-}
-
 int32_t SafeModeOp(Client* client, int32_t argc, char** argv, ErrorCode* err) {
     if (argc < 3) {
         UsageMore(argv[0]);
@@ -2586,9 +2482,23 @@ int32_t UserOp(Client* client, int32_t argc, char** argv, ErrorCode* err) {
     return -1;
 }
 
-int ExecuteCommand(Client* client, int argc, char* argv[]) {
+int main(int argc, char* argv[]) {
+    ::google::ParseCommandLineFlags(&argc, &argv, true);
+
+    if (argc < 2) {
+        Usage(argv[0]);
+        return -1;
+    }
+
     int ret = 0;
     ErrorCode error_code;
+    Client* client = Client::NewClient(FLAGS_flagfile, NULL);
+
+    if (client == NULL) {
+        LOG(ERROR) << "client instance not exist";
+        return -1;
+    }
+
     std::string cmd = argv[1];
     if (cmd == "create") {
         ret = CreateOp(client, argc, argv, &error_code);
@@ -2668,10 +2578,6 @@ int ExecuteCommand(Client* client, int argc, char* argv[]) {
         PrintSystemVersion();
     } else if (cmd == "snapshot") {
         ret = SnapshotOp(client, argc, argv, &error_code);
-    } else if (cmd == "lock") {
-        ret = LockOp(client, argc, argv, &error_code);
-    } else if (cmd == "unlock") {
-        ret = UnlockOp(client, argc, argv, &error_code);
     } else if (cmd == "help") {
         Usage(argv[0]);
     } else if (cmd == "helpmore") {
@@ -2683,47 +2589,6 @@ int ExecuteCommand(Client* client, int argc, char* argv[]) {
         LOG(ERROR) << "fail reason: " << strerr(error_code)
             << " " << error_code.GetReason();
     }
-    return ret;
-}
-
-int main(int argc, char* argv[]) {
-    ::google::ParseCommandLineFlags(&argc, &argv, true);
-
-    if (argc < 2) {
-        Usage(argv[0]);
-        return -1;
-    }
-
-    Client* client = Client::NewClient(FLAGS_flagfile, NULL);
-    if (client == NULL) {
-        LOG(ERROR) << "client instance not exist";
-        return -1;
-    }
-
-    int ret  = 0;
-    if (argc == 2 && strcmp(argv[1], "interactive") == 0) {
-        char* line = NULL;
-        while ((line = readline("tera> ")) != NULL) {
-            char* line_copy = strdup(line);
-            std::vector<char*> arg_list;
-            arg_list.push_back(argv[0]);
-            char* tmp = NULL;
-            char* token = strtok_r(line, " \t", &tmp);
-            while (token != NULL) {
-                arg_list.push_back(token);
-                token = strtok_r(NULL, " \t", &tmp);
-            }
-            if (arg_list.size() > 1) {
-                add_history(line_copy);
-                ExecuteCommand(client, arg_list.size(), &arg_list[0]);
-            }
-            delete[] line_copy;
-            delete[] line;
-        }
-    } else {
-        ret = ExecuteCommand(client, argc, argv);
-    }
-
     delete client;
     return ret;
 }

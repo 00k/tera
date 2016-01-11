@@ -106,6 +106,7 @@ public:
 
     bool ShowTablesInfo(TableMetaList* table_list,
                         TabletMetaList* tablet_list,
+                        bool is_brief,
                         ErrorCode* err);
 
     bool ShowTabletNodesInfo(const string& addr,
@@ -153,6 +154,7 @@ private:
     bool DoShowTablesInfo(TableMetaList* table_list,
                           TabletMetaList* tablet_list,
                           const string& table_name,
+                          bool is_brief,
                           ErrorCode* err);
 private:
     ClientImpl(const ClientImpl&);

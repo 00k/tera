@@ -152,6 +152,7 @@ void TabletWriter::Write(const WriteTabletRequest* request,
         return;
     }
 
+    VLOG(10) << "put mutation in " << m_tablet->GetTablePath();
     m_active_buffer->push_back(task);
     m_active_buffer_size += request_size;
     m_active_buffer_instant |= request->is_instant();
@@ -203,7 +204,8 @@ bool TabletWriter::SwapActiveBuffer(bool force) {
     if (!force && !m_active_buffer_instant && m_active_buffer_size < SYNC_SIZE) {
         return false;
     }
-    VLOG(7) << "SwapActiveBuffer, buffer:" << m_active_buffer_size
+    VLOG(7) << "SwapActiveBuffer, table:" << m_tablet->GetTablePath()
+        << " buffer:" << m_active_buffer_size
         << ":" <<m_active_buffer->size() << ", force:" << force
         << ", instant:" << m_active_buffer_instant;
     WriteTaskBuffer* temp = m_active_buffer;

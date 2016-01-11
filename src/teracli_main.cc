@@ -1890,6 +1890,7 @@ int32_t LockOp(Client* client, int32_t argc, char** argv, ErrorCode* err) {
         std::cout << "lock success" << std::endl;
     } else {
         std::cout << "lock fail: " << err->GetReason() << std::endl;
+        return -1;
     }
 
     return 0;
@@ -1917,6 +1918,58 @@ int32_t UnlockOp(Client* client, int32_t argc, char** argv, ErrorCode* err) {
         std::cout << "unlock success" << std::endl;
     } else {
         std::cout << "unlock fail: " << err->GetReason() << std::endl;
+        return -1;
+    }
+
+    return 0;
+}
+
+int32_t TransactionOp(Client* client, int32_t argc, char** argv, ErrorCode* err) {
+    if (argc != 2) {
+        LOG(ERROR) << "args number error: " << argc << ", need 2.";
+        Usage(argv[0]);
+        return -1;
+    }
+
+    if (client->StartTransaction(0)) {
+        std::cout << "start transaction success" << std::endl;
+    } else {
+        std::cout << "start transaction fail" << std::endl;
+        return -1;
+    }
+
+    return 0;
+}
+
+int32_t CommitOp(Client* client, int32_t argc, char** argv, ErrorCode* err) {
+    if (argc != 2) {
+        LOG(ERROR) << "args number error: " << argc << ", need 2.";
+        Usage(argv[0]);
+        return -1;
+    }
+
+    if (client->CommitTransaction()) {
+        std::cout << "commit transaction success" << std::endl;
+    } else {
+        std::cout << "commit transaction fail" << std::endl;
+        return -1;
+    }
+
+    return 0;
+}
+
+int32_t RollbackOp(Client* client, int32_t argc, char** argv, ErrorCode* err) {
+    if (argc != 2) {
+        LOG(ERROR) << "args number error: " << argc << ", need 2.";
+        Usage(argv[0]);
+        return -1;
+    }
+
+    if (client->RollbackTransaction()) {
+        std::cout << "rollback transaction success" << std::endl;
+    } else {
+        std::cout << "rollback transaction fail" << std::endl;
+        return -1;
     }
 
     return 0;
@@ -2672,6 +2725,12 @@ int ExecuteCommand(Client* client, int argc, char* argv[]) {
         ret = LockOp(client, argc, argv, &error_code);
     } else if (cmd == "unlock") {
         ret = UnlockOp(client, argc, argv, &error_code);
+    } else if (cmd == "transaction") {
+        ret = TransactionOp(client, argc, argv, &error_code);
+    } else if (cmd == "commit") {
+        ret = CommitOp(client, argc, argv, &error_code);
+    } else if (cmd == "rollback") {
+        ret = RollbackOp(client, argc, argv, &error_code);
     } else if (cmd == "help") {
         Usage(argv[0]);
     } else if (cmd == "helpmore") {

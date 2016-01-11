@@ -2026,6 +2026,7 @@ Table* TabletIO::GetTransactionTable() {
     MutexLock l(&m_txn_mutex);
     if (m_txn_table == NULL) {
         if (m_txn_client == NULL) {
+            Client::SetGlogIsInitialized();
             m_txn_client = Client::NewClient();
         }
         if (m_txn_client != NULL) {

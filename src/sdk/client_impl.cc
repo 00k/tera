@@ -884,7 +884,7 @@ bool ClientImpl::StartTransaction(int isolation_level) {
         return false;
     }
 
-    VLOG(10) << "start trasacntion " << std::hex << _txn_id;
+    VLOG(10) << "start transaction " << std::hex << _txn_id;
     _in_txn = true;
     _txn_iso_level = isolation_level;
     return true;
@@ -908,7 +908,7 @@ bool ClientImpl::CommitTransaction() {
         return false;
     }
 
-    VLOG(10) << "commit trasanction " << std::hex << _txn_id;
+    VLOG(10) << "commit transaction " << std::hex << _txn_id;
     _in_txn = false;
     return false;
 }
@@ -931,7 +931,7 @@ bool ClientImpl::RollbackTransaction() {
         return false;
     }
 
-    VLOG(10) << "rollback trasanction " << std::hex << _txn_id;
+    VLOG(10) << "rollback transaction " << std::hex << _txn_id;
 
     _in_txn = false;
     return false;

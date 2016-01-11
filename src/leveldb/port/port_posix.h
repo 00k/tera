@@ -97,7 +97,6 @@ class Mutex {
 
  private:
   friend class CondVar;
-  pthread_mutexattr_t attr_;
   pthread_mutex_t mu_;
 
   // No copying

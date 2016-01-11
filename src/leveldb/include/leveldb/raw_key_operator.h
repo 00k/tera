@@ -51,7 +51,7 @@ public:
             tera_value->assign(value);
             return;
         }
-        tera_value->assign("txn");
+        tera_value->assign("txn:");
         char txn_id_str[8];
         memcpy(txn_id_str, &txn_id, 8);
         tera_value->append(std::string(txn_id_str, 8));
@@ -59,12 +59,12 @@ public:
     }
 
     void ExtractTeraValue(const Slice& tera_value, int64_t* txn_id, Slice* value) const {
-        if (tera_value.size() <= 3 + 8 || strncmp(tera_value.data(), "txn", 3) != 0) {
+        if (tera_value.size() < 4 + 8 || strncmp(tera_value.data(), "txn:", 4) != 0) {
             *value = tera_value;
             return;
         }
-        memcpy((char*)txn_id, tera_value.data() + 3, 8);
-        Slice payload(tera_value.data() + 11, tera_value.size() - 11);
+        memcpy((char*)txn_id, tera_value.data() + 4, 8);
+        Slice payload(tera_value.data() + 12, tera_value.size() - 12);
         *value = payload;
     }
 };

@@ -176,6 +176,7 @@ private:
     /// transaction
     mutable Mutex _txn_mutex;
     bool _in_txn;
+    bool _txn_is_manipulate;
     int64_t _txn_id;
     int _txn_iso_level;
     std::string _txn_id_str;

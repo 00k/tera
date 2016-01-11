@@ -54,7 +54,9 @@ ClientImpl::ClientImpl(const std::string& user_identity,
       _user_identity(user_identity),
       _user_passcode(user_passcode),
       _zk_addr_list(zk_addr_list),
-      _zk_root_path(zk_root_path) {
+      _zk_root_path(zk_root_path),
+      _in_txn(false),
+      _txn_is_manipulate(false) {
     tabletnode::TabletNodeClient::SetThreadPool(&_thread_pool);
     tabletnode::TabletNodeClient::SetRpcOption(
         FLAGS_tera_sdk_rpc_limit_enabled ? FLAGS_tera_sdk_rpc_limit_max_inflow : -1,
@@ -871,22 +873,34 @@ bool ClientImpl::StartTransaction(int isolation_level) {
         VLOG(10) << "cannot start a transaction in another transaction";
         return false;
     }
+    if (_txn_is_manipulate) {
+        VLOG(10) << "cannot start a transaction while another thread is manipulating it";
+        return false;
+    }
+    _txn_is_manipulate = true;
+    _txn_mutex.Unlock();
 
-    _txn_id = Uuid8(&_txn_id_str);
-    RowMutation* row_mu = _txn_table->NewRowMutation(_txn_id_str);
+    int64_t txn_id = 0;
+    std::string txn_id_str;
+    txn_id = Uuid8(&txn_id_str);
+    RowMutation* row_mu = _txn_table->NewRowMutation(txn_id_str);
     row_mu->Put("Y");
     _txn_table->ApplyMutation(row_mu);
     ErrorCode err = row_mu->GetError();
     delete row_mu;
 
+    _txn_mutex.Lock();
+    _txn_is_manipulate = false;
     if (err.GetType() != ErrorCode::kOK) {
         VLOG(10) << "fail to start transaction " << std::hex << _txn_id << " " << err.GetReason();
         return false;
     }
 
-    VLOG(10) << "start transaction " << std::hex << _txn_id;
-    _in_txn = true;
+    _txn_id = txn_id;
+    _txn_id_str = txn_id_str;
     _txn_iso_level = isolation_level;
+    _in_txn = true;
+    VLOG(10) << "start transaction " << std::hex << _txn_id;
     return true;
 }
 
@@ -896,6 +910,12 @@ bool ClientImpl::CommitTransaction() {
         VLOG(10) << "commit pass, not in a transaction";
         return true;
     }
+    if (_txn_is_manipulate) {
+        VLOG(10) << "cannot commit a transaction while another thread is manipulating it";
+        return false;
+    }
+    _txn_is_manipulate = true;
+    _txn_mutex.Unlock();
 
     RowMutation* row_mu = _txn_table->NewRowMutation(_txn_id_str);
     row_mu->DeleteRow();
@@ -903,6 +923,8 @@ bool ClientImpl::CommitTransaction() {
     ErrorCode err = row_mu->GetError();
     delete row_mu;
 
+    _txn_mutex.Lock();
+    _txn_is_manipulate = false;
     if (err.GetType() != ErrorCode::kOK) {
         VLOG(10) << "fail to commit transaction " << std::hex << _txn_id << " " << err.GetReason();
         return false;
@@ -910,7 +932,7 @@ bool ClientImpl::CommitTransaction() {
 
     VLOG(10) << "commit transaction " << std::hex << _txn_id;
     _in_txn = false;
-    return false;
+    return true;
 }
 
 bool ClientImpl::RollbackTransaction() {
@@ -919,6 +941,12 @@ bool ClientImpl::RollbackTransaction() {
         VLOG(10) << "rollback pass, not in a transaction";
         return true;
     }
+    if (_txn_is_manipulate) {
+        VLOG(10) << "cannot rollback a transaction while another thread is manipulating it";
+        return false;
+    }
+    _txn_is_manipulate = true;
+    _txn_mutex.Unlock();
 
     RowMutation* row_mu = _txn_table->NewRowMutation(_txn_id_str);
     row_mu->Put("N");
@@ -926,6 +954,8 @@ bool ClientImpl::RollbackTransaction() {
     ErrorCode err = row_mu->GetError();
     delete row_mu;
 
+    _txn_mutex.Lock();
+    _txn_is_manipulate = false;
     if (err.GetType() != ErrorCode::kOK) {
         VLOG(10) << "fail to rollback transaction " << std::hex << _txn_id << " " << err.GetReason();
         return false;
@@ -934,7 +964,7 @@ bool ClientImpl::RollbackTransaction() {
     VLOG(10) << "rollback transaction " << std::hex << _txn_id;
 
     _in_txn = false;
-    return false;
+    return true;
 }
 
 int64_t ClientImpl::TransactionId() {

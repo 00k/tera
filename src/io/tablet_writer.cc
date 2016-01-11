@@ -15,6 +15,7 @@
 #include "leveldb/lg_coding.h"
 #include "proto/proto_helper.h"
 #include "utils/counter.h"
+#include "utils/string_util.h"
 #include "utils/timer.h"
 
 DECLARE_int32(tera_asyncwriter_pending_limit);
@@ -247,8 +248,10 @@ bool TabletWriter::BatchRequest(const WriteTabletRequest& request,
                 tera_key.assign(row_key);
             }
             if (mu.type() == kPut) {
+                VLOG(10) << "Batch Request, put key: " << DebugString(row_key);
                 batch->Put(tera_key, mu.value());
             } else {
+                VLOG(10) << "Batch Request, delete key: " << DebugString(row_key);
                 batch->Delete(tera_key);
             }
         } else {
@@ -275,13 +278,17 @@ bool TabletWriter::BatchRequest(const WriteTabletRequest& request,
                     for (lg_id = 0; lg_id < lg_num; ++lg_id) {
                         std::string tera_key_tmp = tera_key;
                         leveldb::PutFixed32LGId(&tera_key_tmp, lg_id);
-                        VLOG(10) << "Batch Request, key:" << row_key << ",family:"
-                            << mu.family() << ",lg_id:" << lg_id;
+                        VLOG(10) << "Batch Request, key: " << DebugString(row_key) << " family: "
+                            << mu.family() << " lg_id: " << lg_id << " type: " << type
+                            << " txn_id: " << std::ios::hex << request.transaction_id()
+                            << " " << DebugString(tera_value);
                         batch->Put(tera_key_tmp, tera_value);
                     }
                 } else {
-                    VLOG(10) << "Batch Request, key:" << row_key << ",family:"
-                        << mu.family() << ",lg_id:" << lg_id;
+                    VLOG(10) << "Batch Request, key: " << DebugString(row_key) << " family: "
+                        << mu.family() << " lg_id: " << lg_id << " type: " << type
+                        << " txn_id: " << std::ios::hex << request.transaction_id()
+                        << " " << DebugString(tera_value);
                     batch->Put(tera_key, tera_value);
                 }
             }
@@ -332,22 +339,25 @@ bool TabletWriter::BatchRequest(const WriteTabletRequest& request,
                     if (type != leveldb::TKT_DEL) {
                         lg_id = m_tablet->GetLGidByCFName(mu.family());
                         leveldb::PutFixed32LGId(&tera_key, lg_id);
-                        VLOG(10) << "Batch Request, key:" << row_key << ",family:"
-                            << mu.family() << ",lg_id:" << lg_id;
+                        VLOG(10) << "Batch Request, key: " << DebugString(row_key) << " family: "
+                            << mu.family() << " lg_id: " << lg_id << " type: " << type
+                            << " txn_id: " << std::ios::hex << request.transaction_id();
                         batch->Put(tera_key, tera_value);
                     } else {
                         // put row_del mark to all LGs
                         for (lg_id = 0; lg_id < lg_num; ++lg_id) {
                             std::string tera_key_tmp = tera_key;
                             leveldb::PutFixed32LGId(&tera_key_tmp, lg_id);
-                            VLOG(10) << "Batch Request, key:" << row_key << ",family:"
-                                << mu.family() << ",lg_id:" << lg_id;
+                            VLOG(10) << "Batch Request, key: " << DebugString(row_key) << " family: "
+                                << mu.family() << " lg_id: " << lg_id << " type: " << type
+                                << " txn_id: " << std::ios::hex << request.transaction_id();
                             batch->Put(tera_key_tmp, tera_value);
                         }
                     }
                 } else {
-                    VLOG(10) << "Batch Request, key:" << row_key << ",family:"
-                        << mu.family() << ",lg_id:" << lg_id;
+                    VLOG(10) << "Batch Request, key: " << DebugString(row_key) << " family: "
+                        << mu.family() << " lg_id: " << lg_id << " type: " << type
+                        << " txn_id: " << std::ios::hex << request.transaction_id();
                     batch->Put(tera_key, tera_value);
                 }
             }

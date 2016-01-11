@@ -684,12 +684,15 @@ inline bool TabletIO::LowLevelScan(const std::string& start_tera_key,
             it->Next();
             continue;
         }
+        m_key_operator->ExtractTeraValue(tera_value, &txn_id, &value);
 
         VLOG(10) << "ll-scan: " << "tablet=[" << m_tablet_path
             << "] key=[" << DebugString(key.ToString())
             << "] column=[" << DebugString(col.ToString())
             << ":" << DebugString(qual.ToString())
-            << "] ts=[" << ts << "] type=[" << type << "]";
+            << "] ts=[" << ts << "] type=[" << type << "]"
+            << " txn=[" << std::ios::hex << txn_id << "]"
+            << " value=[" << DebugString(tera_value.ToString()) << "]";
 
         if (now_time > time_out) {
             VLOG(9) << "ll-scan timeout. Mark next start key: " << DebugString(tera_key.ToString());
@@ -702,7 +705,6 @@ inline bool TabletIO::LowLevelScan(const std::string& start_tera_key,
             break;
         }
 
-        m_key_operator->ExtractTeraValue(tera_value, &txn_id, &value);
         if (type == leveldb::TKT_TXN_COMMIT) {
             commit_txn_id.insert(txn_id);
             VLOG(10) << "ll-scan: commit txn id " << std::ios::hex << txn_id;
@@ -717,11 +719,14 @@ inline bool TabletIO::LowLevelScan(const std::string& start_tera_key,
         Table* txn_table = GetTransactionTable();
         if (type == leveldb::TKT_TXN) {
             if (commit_txn_id.find(txn_id) != commit_txn_id.end()) {
-                VLOG(10) << "ll-scan: ignore uncommit txn id " << std::ios::hex << txn_id;
+                VLOG(10) << "ll-scan: ignore uncommit txn: committed, id: "
+                         << std::ios::hex << txn_id;
             } else if (txn_table != NULL &&
                        !txn_table->Get(std::string(txn_id_str, 8), "", "", &tmp_txn_value, &err) &&
                        err.GetType() == ErrorCode::kNotFound) {
-                VLOG(10) << "ll-scan: ignore uncommit txn id, commit interupt" << std::ios::hex << txn_id;
+                commit_txn_id.insert(txn_id);
+                VLOG(10) << "ll-scan: ignore uncommit txn: commit interupt, id: "
+                         << std::ios::hex << txn_id;
             } else {
                 uncommit_txn_id.insert(txn_id);
                 VLOG(10) << "ll-scan: add uncommit txn id " << std::ios::hex << txn_id;

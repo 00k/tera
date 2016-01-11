@@ -121,7 +121,7 @@ public:
 
     // read a row
     virtual bool ReadCells(const RowReaderInfo& row_reader, RowResult* value_list,
-                           uint64_t snapshot_id = 0, StatusCode* status = NULL);
+                           uint64_t snapshot_id = 0, int64_t txn_id = 0, StatusCode* status = NULL);
     /// scan from leveldb return ture means complete flase means not complete
     bool LowLevelScan(const std::string& start_tera_key,
                       const std::string& end_row_key,

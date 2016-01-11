@@ -92,6 +92,7 @@ public:
     virtual bool StartTransaction(int isolation_level);
     virtual bool CommitTransaction();
     virtual bool RollbackTransaction();
+    virtual bool SetDefaultIsolationLevel(int isolation_level);
 
     virtual bool CmdCtrl(const string& command,
                          const std::vector<string>& arg_list,
@@ -126,6 +127,8 @@ public:
 
 public:
     int64_t TransactionId();
+    int TransactionIsolationLevel();
+    int64_t TransactionSnapshot();
 
 private:
     bool ListInternal(std::vector<TableInfo>* table_list,
@@ -178,8 +181,10 @@ private:
     bool _in_txn;
     bool _txn_is_manipulate;
     int64_t _txn_id;
-    int _txn_iso_level;
     std::string _txn_id_str;
+    int _txn_iso_level;
+    int _default_txn_iso_level;
+    int64_t _txn_snapshot;
     Table* _txn_table;
 };
 

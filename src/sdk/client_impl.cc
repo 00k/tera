@@ -56,7 +56,8 @@ ClientImpl::ClientImpl(const std::string& user_identity,
       _zk_addr_list(zk_addr_list),
       _zk_root_path(zk_root_path),
       _in_txn(false),
-      _txn_is_manipulate(false) {
+      _txn_is_manipulate(false),
+      _default_txn_iso_level(kReadCommitted) {
     tabletnode::TabletNodeClient::SetThreadPool(&_thread_pool);
     tabletnode::TabletNodeClient::SetRpcOption(
         FLAGS_tera_sdk_rpc_limit_enabled ? FLAGS_tera_sdk_rpc_limit_max_inflow : -1,
@@ -66,6 +67,7 @@ ClientImpl::ClientImpl(const std::string& user_identity,
     ErrorCode err;
     _txn_table = OpenTable(kTransactionTableName, &err);
     CHECK(_txn_table);
+    _txn_id = Uuid8(&_txn_id_str);
 }
 
 ClientImpl::~ClientImpl() {
@@ -883,8 +885,12 @@ bool ClientImpl::StartTransaction(int isolation_level) {
     int64_t txn_id = 0;
     std::string txn_id_str;
     txn_id = Uuid8(&txn_id_str);
+    int64_t commit_us = get_micros();
+    char commit_value[9];
+    commit_value[0] = 'U';
+    memcpy(commit_value + 1, &commit_us, 8);
     RowMutation* row_mu = _txn_table->NewRowMutation(txn_id_str);
-    row_mu->Put("Y");
+    row_mu->Put(std::string(commit_value, 9));
     _txn_table->ApplyMutation(row_mu);
     ErrorCode err = row_mu->GetError();
     delete row_mu;
@@ -899,6 +905,7 @@ bool ClientImpl::StartTransaction(int isolation_level) {
     _txn_id = txn_id;
     _txn_id_str = txn_id_str;
     _txn_iso_level = isolation_level;
+    _txn_snapshot = get_micros();
     _in_txn = true;
     VLOG(10) << "start transaction " << std::hex << _txn_id;
     return true;
@@ -917,8 +924,12 @@ bool ClientImpl::CommitTransaction() {
     _txn_is_manipulate = true;
     _txn_mutex.Unlock();
 
+    int64_t commit_us = get_micros();
+    char commit_value[9];
+    commit_value[0] = 'C';
+    memcpy(commit_value + 1, &commit_us, 8);
     RowMutation* row_mu = _txn_table->NewRowMutation(_txn_id_str);
-    row_mu->DeleteRow();
+    row_mu->Put(std::string(commit_value, 9));
     _txn_table->ApplyMutation(row_mu);
     ErrorCode err = row_mu->GetError();
     delete row_mu;
@@ -930,7 +941,8 @@ bool ClientImpl::CommitTransaction() {
         return false;
     }
 
-    VLOG(10) << "commit transaction " << std::hex << _txn_id;
+    VLOG(10) << "commit transaction " << std::hex << _txn_id << " at " << commit_us;
+    _txn_id = Uuid8(&_txn_id_str);
     _in_txn = false;
     return true;
 }
@@ -948,8 +960,12 @@ bool ClientImpl::RollbackTransaction() {
     _txn_is_manipulate = true;
     _txn_mutex.Unlock();
 
+    int64_t commit_us = get_micros();
+    char commit_value[9];
+    commit_value[0] = 'R';
+    memcpy(commit_value + 1, &commit_us, 8);
     RowMutation* row_mu = _txn_table->NewRowMutation(_txn_id_str);
-    row_mu->Put("N");
+    row_mu->Put(std::string(commit_value, 9));
     _txn_table->ApplyMutation(row_mu);
     ErrorCode err = row_mu->GetError();
     delete row_mu;
@@ -962,18 +978,42 @@ bool ClientImpl::RollbackTransaction() {
     }
 
     VLOG(10) << "rollback transaction " << std::hex << _txn_id;
-
+    _txn_id = Uuid8(&_txn_id_str);
     _in_txn = false;
+    return true;
+}
+
+bool ClientImpl::SetDefaultIsolationLevel(int isolation_level) {
+    CHECK_GE(isolation_level, 0);
+    CHECK_LE(isolation_level, 3);
+    MutexLock l(&_txn_mutex);
+    _default_txn_iso_level = isolation_level;
     return true;
 }
 
 int64_t ClientImpl::TransactionId() {
     MutexLock l(&_txn_mutex);
-    int64_t txn_id = 0;
+    return _txn_id;
+}
+
+int ClientImpl::TransactionIsolationLevel() {
+    MutexLock l(&_txn_mutex);
+    int64_t level = _default_txn_iso_level;
     if (_in_txn) {
-        txn_id = _txn_id;
+        level = _txn_iso_level;
     }
-    return txn_id;
+    return level;
+}
+
+int64_t ClientImpl::TransactionSnapshot() {
+    MutexLock l(&_txn_mutex);
+    int64_t snapshot = 0;
+    if (_in_txn) {
+        snapshot = _txn_snapshot;
+    } else {
+        snapshot = get_micros();
+    }
+    return snapshot;
 }
 
 bool ClientImpl::CmdCtrl(const string& command,

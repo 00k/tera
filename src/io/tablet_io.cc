@@ -594,6 +594,7 @@ StatusCode TabletIO::InitedScanInterator(const std::string& start_tera_key,
     leveldb::ReadOptions read_option(&m_ldb_options);
     read_option.verify_checksums = FLAGS_tera_leveldb_verify_checksums;
     SetupIteratorOptions(scan_options, &read_option);
+#if 0
     uint64_t snapshot_id = scan_options.snapshot_id;
     if (snapshot_id != 0) {
         if (!SnapshotIDToSeq(snapshot_id, &read_option.snapshot)) {
@@ -601,6 +602,7 @@ StatusCode TabletIO::InitedScanInterator(const std::string& start_tera_key,
             return kSnapshotNotExist;
         }
     }
+#endif
     read_option.rollbacks = rollbacks_;
     *scan_it = m_db->NewIterator(read_option);
     TearDownIteratorOptions(&read_option);
@@ -656,7 +658,8 @@ inline bool TabletIO::LowLevelScan(const std::string& start_tera_key,
     uint32_t buffer_size = 0;
     uint32_t version_num = 1;
     std::set<int64_t> uncommit_txn_id;
-    std::set<int64_t> commit_txn_id;
+    std::map<int64_t, int64_t> commit_txn_id;
+    std::set<int64_t> rollback_txn_id;
     uint64_t nr_scan_round = 0;
     value_list->clear_key_values();
     *read_row_count = 0;
@@ -691,7 +694,7 @@ inline bool TabletIO::LowLevelScan(const std::string& start_tera_key,
             << "] column=[" << DebugString(col.ToString())
             << ":" << DebugString(qual.ToString())
             << "] ts=[" << ts << "] type=[" << type << "]"
-            << " txn=[" << std::ios::hex << txn_id << "]"
+            << " txn=[" << std::hex << txn_id << "]"
             << " value=[" << DebugString(tera_value.ToString()) << "]";
 
         if (now_time > time_out) {
@@ -706,8 +709,9 @@ inline bool TabletIO::LowLevelScan(const std::string& start_tera_key,
         }
 
         if (type == leveldb::TKT_TXN_COMMIT) {
-            commit_txn_id.insert(txn_id);
-            VLOG(10) << "ll-scan: commit txn id " << std::ios::hex << txn_id;
+            commit_txn_id[txn_id] = ts;
+            VLOG(10) << "ll-scan: commit txn at " << ts
+                     << " id " << std::hex << txn_id;
             it->Next();
             continue;
         }
@@ -718,25 +722,56 @@ inline bool TabletIO::LowLevelScan(const std::string& start_tera_key,
         std::string tmp_txn_value;
         Table* txn_table = GetTransactionTable();
         if (type == leveldb::TKT_TXN) {
-            if (commit_txn_id.find(txn_id) != commit_txn_id.end()) {
+            if (txn_id == scan_options.txn_id) {
+                VLOG(10) << "ll-scan: ignore uncommit txn: in own txn, id: "
+                         << std::hex << txn_id;
+            } else if (commit_txn_id.find(txn_id) != commit_txn_id.end()) {
                 VLOG(10) << "ll-scan: ignore uncommit txn: committed, id: "
-                         << std::ios::hex << txn_id;
-            } else if (txn_table != NULL &&
-                       !txn_table->Get(std::string(txn_id_str, 8), "", "", &tmp_txn_value, &err) &&
-                       err.GetType() == ErrorCode::kNotFound) {
-                commit_txn_id.insert(txn_id);
-                VLOG(10) << "ll-scan: ignore uncommit txn: commit interupt, id: "
-                         << std::ios::hex << txn_id;
+                         << std::hex << txn_id;
+            } else if (txn_table == NULL
+                       || !txn_table->Get(std::string(txn_id_str, 8), "", "", &tmp_txn_value, &err)
+                       || tmp_txn_value.size() != 9) {
+                VLOG(10) << "ll-scan: ignore uncommit txn: txn table error, id: "
+                         << std::hex << txn_id;
             } else {
-                uncommit_txn_id.insert(txn_id);
-                VLOG(10) << "ll-scan: add uncommit txn id " << std::ios::hex << txn_id;
+                char txn_type = tmp_txn_value[0];
+                int64_t txn_ts = *(int64_t*)(tmp_txn_value.data() + 1);
+                if (txn_type == 'R') {
+                    rollback_txn_id.insert(txn_id);
+                    VLOG(10) << "ll-scan: add rollback txn id " << std::hex << txn_id;
+                } else if (txn_type == 'C') {
+                    commit_txn_id[txn_id] = txn_ts;
+                    VLOG(10) << "ll-scan: ignore uncommit txn: commited at "
+                             << txn_ts << " id " << std::hex << txn_id;
+                } else if (txn_type == 'U') {
+                    uncommit_txn_id.insert(txn_id);
+                    VLOG(10) << "ll-scan: add uncommit txn id " << std::hex << txn_id;
+                } else {
+                    VLOG(10) << "ll-scan: ignore uncommit txn: txn table error, id: "
+                             << std::hex << txn_id;
+                }
             }
             it->Next();
             continue;
         }
 
-        if (txn_id != 0 && uncommit_txn_id.find(txn_id) != uncommit_txn_id.end()) {
+        if (txn_id != 0 && rollback_txn_id.find(txn_id) != rollback_txn_id.end()) {
+            VLOG(10) << "ll-scan: shadow rollback data";
+            it->Next();
+            continue;
+        }
+        if (scan_options.txn_id != 0 && txn_id != 0
+            && uncommit_txn_id.find(txn_id) != uncommit_txn_id.end()) {
             VLOG(10) << "ll-scan: shadow uncommit data";
+            it->Next();
+            continue;
+        }
+        VLOG(10) << "ll-scan: read snapshot " << scan_options.snapshot_id
+                 << " commit ts " << commit_txn_id[txn_id];
+        if (scan_options.snapshot_id > 0 && txn_id != 0
+            && commit_txn_id.find(txn_id) != commit_txn_id.end()
+            && (uint64_t)commit_txn_id[txn_id] > scan_options.snapshot_id) {
+            VLOG(10) << "ll-scan: shadow recently commit data";
             it->Next();
             continue;
         }
@@ -794,6 +829,7 @@ inline bool TabletIO::LowLevelScan(const std::string& start_tera_key,
             row_buf.clear();
             uncommit_txn_id.clear();
             commit_txn_id.clear();
+            rollback_txn_id.clear();
         }
 
         // max version filter
@@ -1043,7 +1079,7 @@ bool TabletIO::LowLevelSeek(const std::string& row_key,
 }
 
 bool TabletIO::ReadCells(const RowReaderInfo& row_reader, RowResult* value_list,
-                         uint64_t snapshot_id, StatusCode* status) {
+                         uint64_t snapshot_id, int64_t txn_id, StatusCode* status) {
     {
         MutexLock lock(&m_mutex);
         if (m_status != kReady && m_status != kOnSplit
@@ -1091,7 +1127,7 @@ bool TabletIO::ReadCells(const RowReaderInfo& row_reader, RowResult* value_list,
     }
 
     ScanOptions scan_options;
-    bool ll_seek_available = true;
+    bool ll_seek_available = false;
     for (int32_t i = 0; i < row_reader.cf_list_size(); ++i) {
         const ColumnFamily& column_family = row_reader.cf_list(i);
         const std::string& column_family_name = column_family.family_name();
@@ -1119,6 +1155,7 @@ bool TabletIO::ReadCells(const RowReaderInfo& row_reader, RowResult* value_list,
     }
 
     scan_options.snapshot_id = snapshot_id;
+    scan_options.txn_id = txn_id;
 
     VLOG(10) << "ReadCells: " << "key=[" << DebugString(row_reader.key()) << "]";
 

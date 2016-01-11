@@ -393,6 +393,8 @@ void TabletNodeImpl::ReadTablet(int64_t start_micros,
                                 google::protobuf::Closure* done) {
     int32_t row_num = request->row_info_list_size();
     uint64_t snapshot_id = request->snapshot_id() == 0 ? 0 : request->snapshot_id();
+    VLOG(10) << "read tablet: snapshot " << snapshot_id;
+    int64_t txn_id = request->transaction_id();
     uint32_t read_success_num = 0;
 
     for (int32_t i = 0; i < row_num; i++) {
@@ -405,7 +407,7 @@ void TabletNodeImpl::ReadTablet(int64_t start_micros,
         } else {
             if (tablet_io->ReadCells(request->row_info_list(i),
                                      response->mutable_detail()->add_row_result(),
-                                     snapshot_id, &row_status)) {
+                                     snapshot_id, txn_id, &row_status)) {
                 read_success_num++;
             } else {
                 response->mutable_detail()->mutable_row_result()->RemoveLast();

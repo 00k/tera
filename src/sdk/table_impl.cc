@@ -1016,12 +1016,19 @@ void TableImpl::CommitReaders(const std::string server_addr,
     request->set_tablet_name(_name);
     request->set_client_timeout_ms(_pending_timeout_ms);
     if (_client != NULL) {
-        request->set_transaction_id(_client->TransactionId());
+        VLOG(10) << "iso level " << _client->TransactionIsolationLevel()
+                 << " snapshot " << _client->TransactionSnapshot();
+        if (_client->TransactionIsolationLevel() > kReadUncommitted) {
+            request->set_transaction_id(_client->TransactionId());
+        }
+        if (_client->TransactionIsolationLevel() == kRepeatableRead) {
+            request->set_snapshot_id(_client->TransactionSnapshot());
+        }
     }
     for (uint32_t i = 0; i < reader_list.size(); ++i) {
         RowReaderImpl* row_reader = reader_list[i];
         RowReaderInfo* row_reader_info = request->add_row_info_list();
-        request->set_snapshot_id(row_reader->GetSnapshot());
+        // request->set_snapshot_id(row_reader->GetSnapshot());
         row_reader->ToProtoBuf(row_reader_info);
         // row_reader_info->CopyFrom(row_reader->GetRowReaderInfo());
         reader_id_list->push_back(row_reader->GetId());

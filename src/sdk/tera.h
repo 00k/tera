@@ -725,6 +725,7 @@ public:
     virtual bool StartTransaction(int isolation_level) = 0;
     virtual bool CommitTransaction() = 0;
     virtual bool RollbackTransaction() = 0;
+    virtual bool SetDefaultIsolationLevel(int isolation_level) = 0;
 
     virtual bool CmdCtrl(const std::string& command,
                          const std::vector<std::string>& arg_list,

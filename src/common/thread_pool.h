@@ -20,9 +20,9 @@
 namespace common {
 
 // An unscalable thread pool implimention.
-class ThreadPool {
+class ThreadPool2 {
 public:
-    ThreadPool(int thread_num = 10)
+    ThreadPool2(int thread_num, int64_t id)
         : threads_num_(thread_num),
           pending_num_(0),
           work_cv_(&mutex_),
@@ -31,10 +31,11 @@ public:
           schedule_cost_sum_(0),
           schedule_count_(0),
           task_cost_sum_(0),
-          task_count_(0) {
+          task_count_(0),
+          id_(id) {
         Start();
     }
-    ~ThreadPool() {
+    ~ThreadPool2() {
         Stop(false);
     }
     // Start a thread_num threads pool.
@@ -96,7 +97,9 @@ public:
         MutexLock lock(&mutex_);
         int64_t now_time = timer::get_micros();
         int64_t exe_time = now_time + delay * 1000;
-        BGItem bg_item(++last_task_id_, exe_time, task);
+        ++last_task_id_;
+        int64_t task_id = ((id_ << 56) | last_task_id_);
+        BGItem bg_item(task_id, exe_time, task);
         time_queue_.push(bg_item);
         latest_[bg_item.id] = bg_item;
         work_cv_.Signal();
@@ -105,6 +108,7 @@ public:
     /// Cancel a delayed task
     /// if running, wait if non_block==false; return immediately if non_block==true
     bool CancelTask(int64_t task_id, bool non_block = false, bool* is_running = NULL) {
+        task_id = ((task_id << 8) >> 8);
         if (task_id == 0) {
             if (is_running != NULL) {
                 *is_running = false;
@@ -167,11 +171,11 @@ public:
     }
 
 private:
-    ThreadPool(const ThreadPool&);
-    void operator=(const ThreadPool&);
+    ThreadPool2(const ThreadPool2&);
+    void operator=(const ThreadPool2&);
 
     static void* ThreadWrapper(void* arg) {
-        reinterpret_cast<ThreadPool*>(arg)->ThreadProc();
+        reinterpret_cast<ThreadPool2*>(arg)->ThreadProc();
         return NULL;
     }
     void ThreadProc() {
@@ -267,6 +271,83 @@ private:
     int64_t schedule_count_;
     int64_t task_cost_sum_;
     int64_t task_count_;
+
+    int64_t id_;
+};
+
+class ThreadPool {
+public:
+    ThreadPool(int thread_num = 10) {
+        n_ = thread_num;
+        thread_pool_ = new ThreadPool2*[n_];
+        for (int i = 0; i < n_; i++) {
+            thread_pool_[i] = new ThreadPool2(1, i);
+        }
+        Start();
+    }
+    ~ThreadPool() {
+        Stop(false);
+    }
+    // Start a thread_num threads pool.
+    bool Start() {
+        for (int i = 0; i < n_; i++) {
+            thread_pool_[i]->Start();
+        }
+        return true;
+    }
+
+    // Stop the thread pool.
+    // Wait for all pending task to complete if wait is true.
+    bool Stop(bool wait) {
+        for (int i = 0; i < n_; i++) {
+            thread_pool_[i]->Stop(wait);
+        }
+        return true;
+    }
+
+    // Task definition.
+    typedef boost::function<void (int64_t)> Task;
+
+    // Add a task to the thread pool.
+    void AddTask(const Task& task) {
+        int i = random() % n_;
+        thread_pool_[i]->AddTask(task);
+    }
+    void AddPriorityTask(const Task& task) {
+        int i = random() % n_;
+        thread_pool_[i]->AddPriorityTask(task);
+    }
+    int64_t DelayTask(int64_t delay, const Task& task) {
+        int i = random() % n_;
+        int64_t task_id = thread_pool_[i]->DelayTask(delay, task);
+        assert((task_id >> 56) == i);
+        return task_id;
+    }
+    /// Cancel a delayed task
+    /// if running, wait if non_block==false; return immediately if non_block==true
+    bool CancelTask(int64_t task_id, bool non_block = false, bool* is_running = NULL) {
+        int i = (task_id >> 56);
+        return thread_pool_[i]->CancelTask(task_id, non_block, is_running);
+    }
+    int64_t PendingNum() const {
+        int64_t pending_num = 0;
+        for (int i = 0; i < n_; i++) {
+            pending_num += thread_pool_[i]->PendingNum();
+        }
+        return pending_num;
+    }
+    std::string ProfilingLog() {
+        std::string s;
+        for (int i = 0; i < n_; i++) {
+            s += thread_pool_[i]->ProfilingLog();
+            s += "\n";
+        }
+        return s;
+    }
+
+private:
+    int n_;
+    ThreadPool2** thread_pool_;
 };
 
 } // namespace common

@@ -1316,6 +1316,13 @@ bool TabletIO::WriteOne(const std::string& key, const std::string& value,
     return WriteBatch(&batch, false, sync, status);
 }
 
+bool TabletIO::WriteMany(const std::vector<const RowMutationSequence*>& row_mutation_vec,
+                         bool disable_wal, bool sync, StatusCode* status) {
+    leveldb::WriteBatch batch;
+    m_async_writer->BatchRequest(row_mutation_vec, &batch);
+    return WriteBatch(&batch, disable_wal, sync, status);
+}
+
 bool TabletIO::Write(std::vector<const RowMutationSequence*>* row_mutation_vec,
                      std::vector<StatusCode>* status_vec, bool is_instant,
                      WriteCallback callback, StatusCode* status) {

@@ -11,27 +11,30 @@ SHARED_LDFLAGS = -shared -Wl,-soname -Wl,
 INCPATH += -I../ $(DEPS_INCPATH)
 CFLAGS += $(OPT) $(SHARED_CFLAGS) $(INCPATH)
 CXXFLAGS += $(OPT) $(SHARED_CFLAGS) $(INCPATH)
-LDFLAGS += ../../build/lib/libtera.a $(DEPS_LDPATH) $(DEPS_LDFLAGS) -lpthread -lz
+LDFLAGS += ../../build/lib/libtera.a -rdynamic \
+           $(DEPS_LDPATH) $(DEPS_LDFLAGS) -lpthread \
+           -lrt -lz -ldl -lreadline -lncurses
 
-SAMPLE_SRC := ./tera_sample.cc tera_row_txn_sample.cc
+SAMPLE_SRC := ./tera_sample.cc tera_row_txn_sample.cc teralite_sample.cc
 SAMPLE_OBJ := $(SAMPLE_SRC:.cc=.o)
 
 .PHONY: clean
 
-all: sample_demo tera_row_txn_sample
+all: sample_demo tera_row_txn_sample teralite_sample
 
 sample_demo: ./tera_sample.o
 	$(CXX) -o $@ $^ $(LDFLAGS)
-	rm -f ./tera_sample.o
 
 tera_row_txn_sample: tera_row_txn_sample.o
 	$(CXX) -o $@ $^ $(LDFLAGS)
-	rm -f ./tera_row_txn_sample.o
+
+teralite_sample: teralite_sample.o
+	$(CXX) -o $@ $^ ../../build/lib/libteralite.a $(LDFLAGS)
 
 $(SAMPLE_OBJ): %.o: %.cc
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 clean:
-	rm -f ./tera_sample.o
-	rm -f ./sample_demo
+	rm -f $(SAMPLE_OBJ)
+	rm -f ./sample_demo tera_row_txn_sample teralite_sample
 

@@ -783,7 +783,14 @@ class PosixEnv : public Env {
   }
 
   virtual Status NewLogger(const std::string& fname, Logger** result) {
-    FILE* f = fopen(fname.c_str(), "w");
+    FILE* f = NULL;
+    if (fname == "/dev/stdout") {
+      f = stdout;
+    } else if (fname == "/dev/stderr") {
+      f = stderr;
+    } else {
+      f = fopen(fname.c_str(), "w");
+    }
     if (f == NULL) {
       *result = NULL;
       return IOError(fname, errno);

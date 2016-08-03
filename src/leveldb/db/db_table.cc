@@ -509,7 +509,7 @@ Status DBTable::Write(const WriteOptions& options, WriteBatch* my_batch) {
             }
         }
         mutex_.Lock();
-        if (s.ok()) {
+        if (s.ok() && !options_.disable_wal && !options.disable_wal) {
             for (uint32_t i = 0; i < lg_list_.size(); ++i) {
                 lg_list_[i]->AddBoundLogSize(updates->DataSize());
             }

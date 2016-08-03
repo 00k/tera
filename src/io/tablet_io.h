@@ -31,6 +31,9 @@
 #include "utils/counter.h"
 
 namespace tera {
+
+class DBResultStream;
+
 namespace io {
 
 class TabletWriter;
@@ -125,6 +128,9 @@ public:
 
     bool WriteOne(const std::string& key, const std::string& value,
                   bool sync = true, StatusCode* status = NULL);
+    bool WriteMany(const std::vector<const RowMutationSequence*>& row_mutation_vec,
+                   bool disable_wal = false, bool sync = true,
+                   StatusCode* status = NULL);
     bool WriteBatch(leveldb::WriteBatch* batch, bool disable_wal = false, bool sync = true,
                     StatusCode* status = NULL);
     bool Write(std::vector<const RowMutationSequence*>* row_mutation_vec,
@@ -164,6 +170,7 @@ public:
     void ApplySchema(const TableSchema& schema);
 
 private:
+    friend class DBResultStream;
     friend class TabletWriter;
     friend class ScanConextManager;
     bool WriteWithoutLock(const std::string& key, const std::string& value,

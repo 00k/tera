@@ -175,6 +175,10 @@ bool ClientImpl::CreateTable(const TableDescriptor& desc,
     return false;
 }
 
+bool ClientImpl::UpdateTableSchema(const TableDescriptor& desc, ErrorCode* err) {
+    return UpdateTable(desc, err);
+}
+
 bool ClientImpl::UpdateTable(const TableDescriptor& desc, ErrorCode* err) {
     if (!IsTableExist(desc.TableName(), err)) {
         LOG(ERROR) << "table not exist: " << desc.TableName();
@@ -213,12 +217,6 @@ bool ClientImpl::UpdateTable(const TableDescriptor& desc, ErrorCode* err) {
         return false;
     }
 
-    if (FLAGS_tera_online_schema_update_enabled && is_update_lg
-        && IsTableEnabled(desc.TableName(), err)) {
-        err->SetFailed(ErrorCode::kBadParam, "disable this table if you want to update Lg property(ies)");
-        return false;
-    }
-
     string reason;
     if (master_client.UpdateTable(&request, &response)) {
         if (CheckReturnValue(response.status(), reason, err)) {
@@ -253,6 +251,10 @@ bool ClientImpl::UpdateCheck(const std::string& table_name, bool* done, ErrorCod
         err->SetFailed(ErrorCode::kSystem, reason);
     }
     return false;
+}
+
+bool ClientImpl::DropTable(const std::string& name, ErrorCode* err) {
+    return DeleteTable(name, err);
 }
 
 bool ClientImpl::DeleteTable(const std::string& name, ErrorCode* err) {

@@ -2,7 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "sdk/table_impl.h"
+#include "table_impl.h"
+#include "tera.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -31,7 +32,6 @@
 #include "sdk/scan_impl.h"
 #include "sdk/schema_impl.h"
 #include "sdk/sdk_zk.h"
-#include "sdk/tera.h"
 #include "utils/crypt.h"
 #include "utils/string_util.h"
 #include "utils/timer.h"
@@ -107,6 +107,14 @@ RowMutation* TableImpl::NewRowMutation(const std::string& row_key) {
 RowReader* TableImpl::NewRowReader(const std::string& row_key) {
     RowReaderImpl* row_rd = new RowReaderImpl(this, row_key);
     return row_rd;
+}
+
+void TableImpl::Put(RowMutation* row_mu) {
+    ApplyMutation(row_mu);
+}
+
+void TableImpl::Put(const std::vector<RowMutation*>& row_mutations) {
+    ApplyMutation(row_mutations);
 }
 
 void TableImpl::ApplyMutation(RowMutation* row_mu) {
@@ -256,6 +264,18 @@ void TableImpl::Get(const std::vector<RowReader*>& row_readers) {
         row_reader_list[i] = static_cast<RowReaderImpl*>(row_readers[i]);
     }
     DistributeReaders(row_reader_list, true);
+}
+
+bool TableImpl::Get(const std::string& row_key, const std::string& family,
+                    const std::string& qualifier, int64_t* value,
+                    ErrorCode* err) {
+    return Get(row_key, family, qualifier, value, err, 0);
+}
+
+bool TableImpl::Get(const std::string& row_key, const std::string& family,
+                    const std::string& qualifier, std::string* value,
+                    ErrorCode* err) {
+    return Get(row_key, family, qualifier, value, err, 0);
 }
 
 bool TableImpl::Get(const std::string& row_key, const std::string& family,

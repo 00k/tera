@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "sdk/tera.h"
+#include "tera.h"
 #include "lite/lite.h"
 
 #include "io/tablet_io.h"
@@ -45,16 +45,16 @@ namespace tera {
 class DBResultStream : public ResultStream {
 public:
     DBResultStream(io::TabletIO* io) : _io(io), _index(0), _context(new io::ScanContext) {
-        _io->m_key_operator->EncodeTeraKey("", "", "", kLatestTs, leveldb::TKT_VALUE,
-                                           &_context->start_tera_key);
+        _io->key_operator_->EncodeTeraKey("", "", "", kLatestTs, leveldb::TKT_VALUE,
+                                          &_context->start_tera_key);
         _context->end_row_key = "";
         _context->scan_options.max_size = 10 << 20;
 
-        leveldb::ReadOptions read_option(&_io->m_ldb_options);
+        leveldb::ReadOptions read_option(&_io->ldb_options_);
         read_option.verify_checksums = true;
         read_option.fill_cache = false;
-        _context->it = _io->m_db->NewIterator(read_option);
-        _context->compact_strategy = _io->m_ldb_options.compact_strategy_factory->NewInstance();
+        _context->it = _io->db_->NewIterator(read_option);
+        _context->compact_strategy = _io->ldb_options_.compact_strategy_factory->NewInstance();
         _context->version_num = 1;
         _context->ret_code = kTabletNodeOk;
         _context->complete = false;

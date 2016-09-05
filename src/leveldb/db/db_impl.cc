@@ -789,6 +789,9 @@ void DBImpl::MaybeScheduleCompaction() {
     // DB is being deleted; no more background compactions
   } else {
     double score = versions_->CompactionScore();
+    if (options_.disable_compaction) {
+        score = -1.0;
+    }
     if (manual_compaction_ != NULL) {
         score = kManualCompactScore;
     }

@@ -290,6 +290,8 @@ struct Options {
   // disable write-ahead-log
   bool disable_wal;
 
+  bool disable_compaction;
+
   // Create an Options object with default values for all fields.
   Options();
 };

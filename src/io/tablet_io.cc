@@ -63,6 +63,7 @@ DECLARE_int32(tera_memenv_block_cache_size);
 DECLARE_bool(tera_tablet_use_memtable_on_leveldb);
 DECLARE_int64(tera_tablet_memtable_ldb_write_buffer_size);
 DECLARE_int64(tera_tablet_memtable_ldb_block_size);
+DECLARE_bool(leveldb_disable_compaction);
 
 extern tera::Counter row_read_delay;
 
@@ -262,6 +263,7 @@ bool TabletIO::Load(const TableSchema& schema,
         rollbacks_[id_to_snapshot_num_[it->first]] = it->second;
         ldb_options_.rollbacks[id_to_snapshot_num_[it->first]] = it->second;
     }
+    ldb_options_.disable_compaction = FLAGS_leveldb_disable_compaction;
 
     leveldb::Status db_status = leveldb::DB::Open(ldb_options_, tablet_path_, &db_);
 

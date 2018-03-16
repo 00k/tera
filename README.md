@@ -92,4 +92,3 @@ See [Contributions](doc/en/contributor.md) for more details.
 
 ## Follow us
 To join us, please send resume to {dist-lab, tera_dev, opensearch} at baidu.com.
-
